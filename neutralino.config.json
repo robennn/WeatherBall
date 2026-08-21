@@ -1,0 +1,69 @@
+{
+  "$schema": "https://raw.githubusercontent.com/neutralinojs/neutralinojs/main/schemas/neutralino.config.schema.json",
+  "applicationId": "com.weatherball.app",
+  "version": "1.0.0",
+  "defaultMode": "window",
+  "port": 0,
+  "documentRoot": "/dist/",
+  "url": "/",
+  "enableServer": true,
+  "enableNativeAPI": true,
+  "tokenSecurity": "none",
+  "logging": {
+    "enabled": true,
+    "writeToLogFile": false
+  },
+  "nativeAllowList": [
+    "app.*",
+    "os.*",
+    "window.*",
+    "events.*",
+    "filesystem.getStats",
+    "filesystem.readFile",
+    "filesystem.writeFile",
+    "filesystem.remove",
+    "filesystem.createDirectory",
+    "debug.log"
+  ],
+  "modes": {
+    "window": {
+      "title": "天气球",
+      "width": 160,
+      "height": 232,
+      "minWidth": 120,
+      "minHeight": 160,
+      "resizable": false,
+      "maximize": false,
+      "hidden": false,
+      "alwaysOnTop": true,
+      "transparent": true,
+      "borderless": true,
+      "skipTaskbar": true,
+      "useSavedState": true,
+      "exitProcessOnClose": true,
+      "enableInspector": false,
+      "injectGlobals": true,
+      "injectClientLibrary": false,
+      "icon": "/resources/tray.png"
+    }
+  },
+  "cli": {
+    "binaryName": "weatherball",
+    "resourcesPath": "/dist/",
+    "distributionPath": "/release/",
+    "extensionsPath": "/extensions/",
+    "clientLibrary": "/public/neutralino.js",
+    "binaryVersion": "6.0.0",
+    "clientVersion": "6.0.0",
+    "copyItems": [
+      "resources"
+    ],
+    "frontendLibrary": {
+      "patchFile": "/index.html",
+      "devUrl": "http://localhost:5173",
+      "projectPath": "/",
+      "devCommand": "npm run dev:web",
+      "waitTimeout": 30000
+    }
+  }
+}

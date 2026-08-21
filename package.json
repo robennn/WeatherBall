@@ -1,0 +1,27 @@
+{
+  "name": "weatherball",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Desktop weather ball that morphs with the weather",
+  "type": "module",
+  "scripts": {
+    "dev": "neu run -- --window-skip-taskbar=true",
+    "dev:web": "vite",
+    "build": "npm run build:web && neu build",
+    "build:web": "vue-tsc -b && vite build",
+    "neu:update": "neu update"
+  },
+  "dependencies": {
+    "@neutralinojs/lib": "6.0.0",
+    "vue": "^3.5.40"
+  },
+  "devDependencies": {
+    "@neutralinojs/neu": "^11.7.2",
+    "@types/node": "^24.13.3",
+    "@vitejs/plugin-vue": "^6.0.8",
+    "@vue/tsconfig": "^0.9.1",
+    "typescript": "~5.9.2",
+    "vite": "^8.2.0",
+    "vue-tsc": "^3.3.8"
+  }
+}
