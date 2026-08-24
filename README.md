@@ -26,7 +26,11 @@
    winget install Microsoft.VisualStudio.2022.BuildTools --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
    ```
 
-### 编译运行
+### 下载运行
+
+不解源码可直接下载 [`release/weatherball-native-windows.zip`](release/weatherball-native-windows.zip)，解压后双击 `weatherball-native.exe`。
+
+### 自行编译
 
 ```powershell
 cd native
