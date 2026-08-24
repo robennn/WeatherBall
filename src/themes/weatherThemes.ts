@@ -73,28 +73,29 @@ function precipParticles(
 ): Pick<OrbTheme, 'dropCount' | 'dropFast' | 'flakeCount'> {
   const level: PrecipIntensity = intensity ?? 'moderate'
 
+  // Keep counts modest — WebView2 GPU/compositor memory scales with animated layers
   if (kind === 'drizzle') {
-    if (level === 'light') return { dropCount: 6, dropFast: false, flakeCount: 0 }
-    if (level === 'heavy') return { dropCount: 12, dropFast: false, flakeCount: 0 }
-    return { dropCount: 9, dropFast: false, flakeCount: 0 }
+    if (level === 'light') return { dropCount: 4, dropFast: false, flakeCount: 0 }
+    if (level === 'heavy') return { dropCount: 8, dropFast: false, flakeCount: 0 }
+    return { dropCount: 6, dropFast: false, flakeCount: 0 }
   }
 
   if (kind === 'rain') {
-    if (level === 'light') return { dropCount: 10, dropFast: false, flakeCount: 0 }
-    if (level === 'heavy') return { dropCount: 26, dropFast: true, flakeCount: 0 }
-    return { dropCount: 16, dropFast: false, flakeCount: 0 }
+    if (level === 'light') return { dropCount: 6, dropFast: false, flakeCount: 0 }
+    if (level === 'heavy') return { dropCount: 14, dropFast: true, flakeCount: 0 }
+    return { dropCount: 10, dropFast: false, flakeCount: 0 }
   }
 
   if (kind === 'storm') {
-    if (level === 'light') return { dropCount: 14, dropFast: true, flakeCount: 0 }
-    if (level === 'heavy') return { dropCount: 28, dropFast: true, flakeCount: 0 }
-    return { dropCount: 20, dropFast: true, flakeCount: 0 }
+    if (level === 'light') return { dropCount: 8, dropFast: true, flakeCount: 0 }
+    if (level === 'heavy') return { dropCount: 16, dropFast: true, flakeCount: 0 }
+    return { dropCount: 12, dropFast: true, flakeCount: 0 }
   }
 
   if (kind === 'snow') {
-    if (level === 'light') return { dropCount: 0, dropFast: false, flakeCount: 10 }
-    if (level === 'heavy') return { dropCount: 0, dropFast: false, flakeCount: 28 }
-    return { dropCount: 0, dropFast: false, flakeCount: 18 }
+    if (level === 'light') return { dropCount: 0, dropFast: false, flakeCount: 6 }
+    if (level === 'heavy') return { dropCount: 0, dropFast: false, flakeCount: 14 }
+    return { dropCount: 0, dropFast: false, flakeCount: 10 }
   }
 
   return { dropCount: 0, dropFast: false, flakeCount: 0 }

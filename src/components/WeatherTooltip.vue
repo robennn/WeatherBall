@@ -51,8 +51,9 @@ defineProps<{
     opacity 0.18s ease,
     transform 0.18s ease;
   -webkit-app-region: no-drag;
-  backdrop-filter: blur(12px) saturate(1.1);
-  -webkit-backdrop-filter: blur(12px) saturate(1.1);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: rgba(12, 18, 32, 0.94);
   box-shadow:
     0 0 0 1px rgba(0, 0, 0, 0.3),
     0 10px 28px rgba(0, 0, 0, 0.45);

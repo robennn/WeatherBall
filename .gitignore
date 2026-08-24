@@ -13,6 +13,10 @@ dist-ssr
 dist-electron
 *.local
 release
+# Rust native prototype
+native/target
+native/run-*.txt
+native/assets/_process_clouds.py
 # Neutralino
 .tmp
 bin

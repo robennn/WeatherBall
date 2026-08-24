@@ -44,7 +44,8 @@
       "enableInspector": false,
       "injectGlobals": true,
       "injectClientLibrary": false,
-      "icon": "/resources/tray.png"
+      "icon": "/resources/tray.png",
+      "webviewArgs": "--disable-features=msSmartScreenProtection --disable-background-networking --disable-component-update --disable-sync --metrics-recording-only --js-flags=--max-old-space-size=96"
     }
   },
   "cli": {

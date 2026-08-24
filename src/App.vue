@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import WeatherBall from './components/WeatherBall.vue'
 import WeatherDetail from './components/WeatherDetail.vue'
 import { useWeather } from './composables/useWeather'
@@ -42,6 +42,21 @@ const showPreview =
 const previewIndex = ref<number | null>(null)
 const detailOpen = ref(false)
 const cityPicking = ref(false)
+/** Pause CSS animations when OS hides the window (tray / fullscreen) */
+const animPaused = ref(false)
+
+function syncAnimPause() {
+  animPaused.value = document.hidden
+}
+
+onMounted(() => {
+  document.addEventListener('visibilitychange', syncAnimPause)
+  syncAnimPause()
+})
+
+onUnmounted(() => {
+  document.removeEventListener('visibilitychange', syncAnimPause)
+})
 
 const liveKind = computed<WeatherKind>(() => {
   if (weather.value) return weather.value.kind
@@ -185,7 +200,7 @@ function onTestPointerLeave() {
 <template>
   <div
     class="app"
-    :class="{ expanded: detailOpen, picking: detailOpen && cityPicking }"
+    :class="{ expanded: detailOpen, picking: detailOpen && cityPicking, paused: animPaused }"
     :style="accentStyle"
   >
     <WeatherBall
@@ -262,6 +277,23 @@ function onTestPointerLeave() {
 
 .app.expanded.picking {
   height: 520px;
+}
+
+.app.paused :deep(.ball),
+.app.paused :deep(.glow),
+.app.paused :deep(.glass),
+.app.paused :deep(.fx),
+.app.paused :deep(.drop),
+.app.paused :deep(.flake),
+.app.paused :deep(.cloud),
+.app.paused :deep(.mist),
+.app.paused :deep(.mote),
+.app.paused :deep(.sun-core),
+.app.paused :deep(.sun-rays),
+.app.paused :deep(.bolt),
+.app.paused :deep(.sky-flash),
+.app.paused :deep(.wave) {
+  animation-play-state: paused !important;
 }
 
 /* Sit under the orb so it never covers the detail refresh button */

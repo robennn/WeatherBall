@@ -52,26 +52,22 @@ if (-not (Test-Path -LiteralPath $wd)) {
   $wd = Split-Path -Parent $exe
 }
 
-# Neutralino resolves resources.neu from --path / exe directory
-$runValue = '"' + $exe + '" --path="' + $wd + '"'
+# Prefer delayed launcher so the shell tray exists before NotifyIcon is created
+$launcher = Join-Path $wd 'resources\start-on-login.ps1'
+if (-not (Test-Path -LiteralPath $launcher)) {
+  # Fallback: start exe directly (may miss tray on cold boot)
+  $runValue = '"' + $exe + '" --path="' + $wd + '"'
+} else {
+  $runValue =
+    'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' +
+    $launcher +
+    '" -ExePath "' + $exe + '" -WorkDir "' + $wd + '"'
+}
+
 Set-ItemProperty -Path $RunKey -Name $Name -Value $runValue
 
-# Startup folder shortcut is more reliable on some Windows setups
-try {
-  if (-not (Test-Path -LiteralPath $StartupDir)) {
-    New-Item -ItemType Directory -Path $StartupDir -Force | Out-Null
-  }
-  $shell = New-Object -ComObject WScript.Shell
-  $sc = $shell.CreateShortcut($LnkPath)
-  $sc.TargetPath = $exe
-  $sc.WorkingDirectory = $wd
-  $sc.Arguments = '--path="' + $wd + '"'
-  $sc.WindowStyle = 1
-  $sc.Description = 'WeatherBall'
-  $sc.Save()
-} catch {
-  # Run key alone is still OK
-}
+# Remove Startup shortcut to avoid launching twice (Run + Startup)
+Remove-Item -LiteralPath $LnkPath -Force -ErrorAction SilentlyContinue
 
 if (-not (Test-Enabled)) {
   throw 'Failed to write startup entry'

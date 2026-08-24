@@ -82,6 +82,9 @@ public static class WeatherBallWin {
   [DllImport("user32.dll", CharSet = CharSet.Unicode)]
   static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
 
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+
   const uint MONITOR_DEFAULTTONEAREST = 2;
 
   [ComImport, Guid("56FDF342-FD6D-11d0-958A-006097C9A090")]
@@ -179,6 +182,10 @@ public static class WeatherBallWin {
     } catch {
       return false;
     }
+  }
+
+  public static bool TrayReady() {
+    return FindWindow("Shell_TrayWnd", null) != IntPtr.Zero;
   }
 
   static void SetClickThrough(IntPtr hWnd, bool enable) {
@@ -375,6 +382,18 @@ if (-not $hasMutex) {
   exit 0
 }
 
+# Wait for the Windows shell tray (critical after logon / autostart)
+for ($i = 0; $i -lt 90; $i++) {
+  try {
+    if (Test-Path -LiteralPath $ExitPath) { exit 0 }
+  } catch { }
+  try {
+    if ([WeatherBallWin]::TrayReady()) { break }
+  } catch { }
+  Start-Sleep -Seconds 1
+}
+Start-Sleep -Milliseconds 800
+
 $bitmap = $null
 $icon = $null
 try {
@@ -387,6 +406,41 @@ try {
 $notify = New-Object System.Windows.Forms.NotifyIcon
 $notify.Icon = $icon
 $notify.Visible = $true
+
+function Refresh-TrayIcon {
+  try {
+    $notify.Visible = $false
+    $notify.Visible = $true
+  } catch { }
+}
+
+# Recreate tray icon when Explorer restarts (TaskbarCreated)
+Add-Type -TypeDefinition @"
+using System;
+using System.Windows.Forms;
+using System.Runtime.InteropServices;
+
+public class TaskbarCreatedWatcher : NativeWindow {
+  public Action OnTaskbarCreated;
+  readonly uint _msg;
+  public TaskbarCreatedWatcher() {
+    _msg = RegisterWindowMessage("TaskbarCreated");
+    CreateHandle(new CreateParams());
+  }
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  static extern uint RegisterWindowMessage(string lpString);
+  protected override void WndProc(ref Message m) {
+    if (m.Msg == (int)_msg && OnTaskbarCreated != null) OnTaskbarCreated();
+    base.WndProc(ref m);
+  }
+}
+"@ -ReferencedAssemblies System.Windows.Forms
+
+$script:trayWatcher = $null
+try {
+  $script:trayWatcher = New-Object TaskbarCreatedWatcher
+  $script:trayWatcher.OnTaskbarCreated = [Action]{ Refresh-TrayIcon }
+} catch { }
 
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
 $itemToggle = New-Object System.Windows.Forms.ToolStripMenuItem
@@ -468,6 +522,10 @@ $timer.add_Tick({
       }
       if (($script:tickCount % 25) -eq 0) {
         [WeatherBallWin]::HideProcessFromTaskbar($ParentPid)
+      }
+      # Re-assert icon visibility periodically (helps flaky post-logon trays)
+      if (($script:tickCount % 75) -eq 0) {
+        if (-not $notify.Visible) { $notify.Visible = $true }
       }
     }
   } catch { }

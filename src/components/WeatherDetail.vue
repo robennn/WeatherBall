@@ -237,8 +237,7 @@ function onClose() {
   border-radius: 18px;
   background: rgba(12, 18, 32, 0.92);
   border: 1px solid transparent;
-  backdrop-filter: blur(18px) saturate(1.2);
-  -webkit-backdrop-filter: blur(18px) saturate(1.2);
+  background: rgba(12, 18, 32, 0.94);
   box-shadow: none;
   color: #f4f7fb;
   font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', 'PingFang SC', 'Segoe UI', sans-serif;

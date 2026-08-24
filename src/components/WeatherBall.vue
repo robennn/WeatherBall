@@ -58,7 +58,7 @@ function sleep(ms: number) {
 function buildParticles() {
   const t = theme.value
 
-  motes.value = Array.from({ length: 8 }, () => {
+  motes.value = Array.from({ length: 5 }, () => {
     const size = rand(2, 4.5)
     const dur = rand(4, 8)
     return {
@@ -387,12 +387,13 @@ watch(
 
 .glow {
   position: absolute;
-  inset: -22%;
-  background: radial-gradient(circle, var(--glow) 0%, transparent 62%);
-  filter: blur(4px);
+  inset: -18%;
+  background: radial-gradient(circle, var(--glow) 0%, transparent 68%);
+  /* Avoid heavy blur filters — large GPU memory on WebView2 */
   transition: background 1.2s ease;
-  animation: glowPulse 6s ease-in-out infinite;
+  animation: glowPulse 7s ease-in-out infinite;
   pointer-events: none;
+  opacity: 0.9;
 }
 
 .glass {
@@ -412,8 +413,6 @@ watch(
     inset 0 -10px 18px rgba(255, 255, 255, 0.1),
     inset 0 7px 14px rgba(255, 255, 255, 0.16),
     0 12px 28px rgba(0, 0, 0, 0.4);
-  backdrop-filter: blur(2px);
-  -webkit-backdrop-filter: blur(2px);
   animation: bob 5.5s ease-in-out infinite;
   overflow: hidden;
 }
@@ -624,8 +623,9 @@ watch(
   width: 150%;
   height: 12px;
   background: linear-gradient(90deg, transparent, rgba(205, 214, 224, 0.4), transparent);
-  filter: blur(3px);
+  filter: none;
   animation: mistMove ease-in-out infinite alternate;
+  opacity: 0.45;
 }
 
 .mist.m1 {
@@ -682,7 +682,6 @@ watch(
   margin-top: 2px;
   border-radius: 50%;
   background: radial-gradient(ellipse, rgba(0, 0, 0, 0.45), transparent 70%);
-  filter: blur(2px);
   flex-shrink: 0;
 }
 

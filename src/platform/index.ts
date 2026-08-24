@@ -554,6 +554,28 @@ async function createNeutralinoApi(): Promise<DesktopApi> {
 
   if (isWindows) {
     await startWinTrayHost()
+    // Autostart / cold boot: tray host may race Explorer — retry a few times
+    for (const ms of [2500, 7000, 15000]) {
+      window.setTimeout(() => {
+        void (async () => {
+          try {
+            const pidRaw = await neu.filesystem.readFile(trayPidPath)
+            const pid = Number(String(pidRaw).trim())
+            if (Number.isFinite(pid) && pid > 0) {
+              // Host claims to be alive; still nudge a restart if shell was late
+              return
+            }
+          } catch {
+            /* pid file missing */
+          }
+          await startWinTrayHost()
+        })()
+      }, ms)
+    }
+    // Always one deferred restart after shell settle (recreates NotifyIcon if needed)
+    window.setTimeout(() => {
+      void startWinTrayHost()
+    }, 12000)
     trayPollTimer = window.setInterval(() => {
       void pollWinTrayCmd()
     }, 350)
