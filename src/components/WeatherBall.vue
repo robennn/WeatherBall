@@ -408,11 +408,12 @@ watch(
       rgba(160, 200, 255, 0.05) 68%,
       rgba(255, 255, 255, 0.14)
     );
-  border: 1px solid rgba(255, 255, 255, 0.22);
+  border: 1px solid rgba(32, 42, 58, 0.42);
   box-shadow:
     inset 0 -10px 18px rgba(255, 255, 255, 0.1),
     inset 0 7px 14px rgba(255, 255, 255, 0.16),
-    0 12px 28px rgba(0, 0, 0, 0.4);
+    0 0 0 1px rgba(18, 24, 38, 0.35),
+    0 10px 22px rgba(0, 0, 0, 0.42);
   animation: bob 5.5s ease-in-out infinite;
   overflow: hidden;
 }
@@ -681,7 +682,7 @@ watch(
   height: 10px;
   margin-top: 2px;
   border-radius: 50%;
-  background: radial-gradient(ellipse, rgba(0, 0, 0, 0.45), transparent 70%);
+  background: radial-gradient(ellipse, rgba(0, 0, 0, 0.55), transparent 70%);
   flex-shrink: 0;
 }
 

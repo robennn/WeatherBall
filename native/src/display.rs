@@ -466,3 +466,140 @@ struct MonitorInfo {
     rc_work: WinRect,
     dw_flags: u32,
 }
+
+/// Hide while a game is exclusive-fullscreen or a video covers this monitor.
+pub fn should_auto_hide(orb_hwnd: isize) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        if session_wants_overlay_hidden() {
+            return true;
+        }
+        foreign_fullscreen_over_orb(orb_hwnd)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = orb_hwnd;
+        false
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn session_wants_overlay_hidden() -> bool {
+    const QUNS_RUNNING_D3D_FULL_SCREEN: i32 = 3;
+    const QUNS_PRESENTATION_MODE: i32 = 4;
+    #[link(name = "shell32")]
+    extern "system" {
+        fn SHQueryUserNotificationState(state: *mut i32) -> i32;
+    }
+    let mut state = 0i32;
+    let hr = unsafe { SHQueryUserNotificationState(&mut state) };
+    hr == 0 && matches!(state, QUNS_RUNNING_D3D_FULL_SCREEN | QUNS_PRESENTATION_MODE)
+}
+
+#[cfg(target_os = "windows")]
+fn foreign_fullscreen_over_orb(orb_hwnd: isize) -> bool {
+    use std::ffi::c_void;
+    const MONITOR_DEFAULTTONEAREST: u32 = 2;
+
+    extern "system" {
+        fn GetForegroundWindow() -> *mut c_void;
+        fn GetWindowThreadProcessId(hwnd: *mut c_void, pid: *mut u32) -> u32;
+        fn GetClassNameW(hwnd: *mut c_void, buf: *mut u16, max: i32) -> i32;
+        fn IsWindowVisible(hwnd: *mut c_void) -> i32;
+        fn GetWindowRect(hwnd: *mut c_void, rect: *mut WinRect) -> i32;
+        fn MonitorFromWindow(hwnd: *mut c_void, flags: u32) -> *mut c_void;
+        fn GetMonitorInfoW(hmon: *mut c_void, info: *mut MonitorInfo) -> i32;
+        fn GetCurrentProcessId() -> u32;
+        fn GetWindowLongPtrW(hwnd: *mut c_void, index: i32) -> isize;
+    }
+
+    let fg = unsafe { GetForegroundWindow() };
+    if fg.is_null() {
+        return false;
+    }
+    if orb_hwnd != 0 && fg as isize == orb_hwnd {
+        return false;
+    }
+
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(fg, &mut pid) };
+    if pid == unsafe { GetCurrentProcessId() } {
+        return false;
+    }
+    if unsafe { IsWindowVisible(fg) } == 0 {
+        return false;
+    }
+
+    let mut buf = [0u16; 96];
+    let n = unsafe { GetClassNameW(fg, buf.as_mut_ptr(), buf.len() as i32) };
+    if n > 0 {
+        let cls = String::from_utf16_lossy(&buf[..n as usize]);
+        match cls.as_str() {
+            "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd"
+            | "XamlExplorerHostIslandWindow" | "NotifyIconOverflowWindow"
+            | "ForegroundStaging" | "Windows.UI.Core.CoreWindow" => {
+                return false;
+            }
+            _ => {}
+        }
+    }
+
+    let mut wr = WinRect::zero();
+    if unsafe { GetWindowRect(fg, &mut wr) } == 0 {
+        return false;
+    }
+    let fg_mon = unsafe { MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST) };
+    if fg_mon.is_null() {
+        return false;
+    }
+    if orb_hwnd != 0 {
+        let orb_mon =
+            unsafe { MonitorFromWindow(orb_hwnd as *mut c_void, MONITOR_DEFAULTTONEAREST) };
+        if !orb_mon.is_null() && orb_mon != fg_mon {
+            return false;
+        }
+    }
+
+    let mut mi = MonitorInfo {
+        cb_size: std::mem::size_of::<MonitorInfo>() as u32,
+        rc_monitor: WinRect::zero(),
+        rc_work: WinRect::zero(),
+        dw_flags: 0,
+    };
+    if unsafe { GetMonitorInfoW(fg_mon, &mut mi) } == 0 {
+        return false;
+    }
+    let mr = mi.rc_monitor;
+    let mw = (mr.right - mr.left).max(0);
+    let mh = (mr.bottom - mr.top).max(0);
+    if mw < 320 || mh < 240 {
+        return false;
+    }
+    let ww = (wr.right - wr.left).max(0);
+    let wh = (wr.bottom - wr.top).max(0);
+    if ww <= 0 || wh <= 0 {
+        return false;
+    }
+    // Fullscreen covers the monitor; maximized apps usually stop at the taskbar (rcWork).
+    if (ww as i64) * (wh as i64) < (mw as i64) * (mh as i64) * 97 / 100 {
+        return false;
+    }
+    if wr.left > mr.left + 8 || wr.top > mr.top + 8 {
+        return false;
+    }
+    if wr.right < mr.right - 8 || wr.bottom < mr.bottom - 8 {
+        return false;
+    }
+
+    // Maximized captioned windows can fill the monitor when the taskbar auto-hides.
+    const GWL_STYLE: i32 = -16;
+    const WS_CAPTION: isize = 0x00C0_0000;
+    const WS_POPUP: isize = 0x8000_0000;
+    let style = unsafe { GetWindowLongPtrW(fg, GWL_STYLE) };
+    let captioned = style & WS_CAPTION == WS_CAPTION;
+    let popup = style & WS_POPUP != 0;
+    if captioned && !popup {
+        return false;
+    }
+    true
+}

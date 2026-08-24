@@ -252,6 +252,7 @@ struct OrbApp {
     pos_applied: bool,
     last_passthrough: Option<bool>,
     taskbar_hidden: bool,
+    fullscreen_occluded: Arc<AtomicBool>,
     tray: Option<TrayUi>,
 }
 
@@ -353,6 +354,13 @@ fn main() -> eframe::Result<()> {
 
             let window_visible = Arc::new(AtomicBool::new(true));
             let main_hwnd = Arc::new(AtomicIsize::new(0));
+            let fullscreen_occluded = Arc::new(AtomicBool::new(false));
+            spawn_fullscreen_poller(
+                Arc::clone(&window_visible),
+                Arc::clone(&main_hwnd),
+                Arc::clone(&fullscreen_occluded),
+                cc.egui_ctx.clone(),
+            );
 
             Ok(Box::new(OrbApp {
                 quit,
@@ -379,6 +387,7 @@ fn main() -> eframe::Result<()> {
                 pos_applied: false,
                 last_passthrough: None,
                 taskbar_hidden: false,
+                fullscreen_occluded,
                 tray: None,
             }))
         }),
@@ -477,6 +486,7 @@ impl eframe::App for OrbApp {
                     Arc::clone(&self.window_visible),
                     Arc::clone(&self.main_hwnd),
                     Arc::clone(&self.open_at_login),
+                    Arc::clone(&self.fullscreen_occluded),
                     ctx.clone(),
                 )
                 .ok();
@@ -490,6 +500,13 @@ impl eframe::App for OrbApp {
 
         // User hid the orb — skip painting; tray show will request_repaint.
         if !visible {
+            return;
+        }
+
+        // Fullscreen hide/show is driven by spawn_fullscreen_poller (the GUI loop
+        // often stops while the hwnd is SW_HIDE, so we cannot restore from here).
+        if self.fullscreen_occluded.load(Ordering::Relaxed) {
+            ctx.request_repaint_after(Duration::from_millis(200));
             return;
         }
 
@@ -741,12 +758,58 @@ impl OrbApp {
     }
 }
 
+/// Hide/show while another app is fullscreen. Must not live on the GUI thread:
+/// SW_HIDE stops eframe from ticking, so restore would never run.
+fn spawn_fullscreen_poller(
+    window_visible: Arc<AtomicBool>,
+    main_hwnd: Arc<AtomicIsize>,
+    fullscreen_occluded: Arc<AtomicBool>,
+    ctx: egui::Context,
+) {
+    thread::spawn(move || {
+        let mut hidden_by_fs = false;
+        let mut clear_ticks = 0u8;
+        loop {
+            thread::sleep(Duration::from_millis(180));
+            let hwnd = main_hwnd.load(Ordering::Relaxed);
+            if hwnd == 0 {
+                continue;
+            }
+            let user_on = window_visible.load(Ordering::Relaxed);
+            let fs = display::should_auto_hide(hwnd);
+            if fs {
+                clear_ticks = 0;
+                fullscreen_occluded.store(true, Ordering::Relaxed);
+                if user_on && !hidden_by_fs {
+                    win_set_window_visible(hwnd, false);
+                    hidden_by_fs = true;
+                }
+                continue;
+            }
+            if hidden_by_fs {
+                clear_ticks = clear_ticks.saturating_add(1);
+                if clear_ticks < 2 {
+                    continue;
+                }
+            }
+            fullscreen_occluded.store(false, Ordering::Relaxed);
+            if hidden_by_fs && user_on {
+                win_set_window_visible(hwnd, true);
+                ctx.request_repaint();
+            }
+            hidden_by_fs = false;
+            clear_ticks = 0;
+        }
+    });
+}
+
 /// Tray clicks are handled off the GUI thread so hide/quit stay responsive.
 /// Menu text is applied on the GUI thread (MenuItem is not Send).
 fn spawn_tray_poller(
     window_visible: Arc<AtomicBool>,
     main_hwnd: Arc<AtomicIsize>,
     open_at_login: Arc<AtomicBool>,
+    fullscreen_occluded: Arc<AtomicBool>,
     tray_hmenu: Arc<AtomicIsize>,
     ctx: egui::Context,
 ) {
@@ -764,7 +827,11 @@ fn spawn_tray_poller(
                     }
                     let show = !window_visible.load(Ordering::Relaxed);
                     window_visible.store(show, Ordering::Relaxed);
-                    win_set_window_visible(h, show);
+                    if show && fullscreen_occluded.load(Ordering::Relaxed) {
+                        // Stay hidden until the fullscreen app exits.
+                    } else {
+                        win_set_window_visible(h, show);
+                    }
                     ctx.request_repaint();
                     schedule_menu_text(Arc::clone(&tray_hmenu), 0, toggle_label(show));
                 }
@@ -1659,12 +1726,28 @@ fn paint_orb(
     flakes: &[Flake],
     clouds: &CloudTextures,
 ) {
-    // 1) Outer glow
+    // 1) Dark halo + contact shadow so the orb reads on light wallpapers.
     {
         let p = ui.painter();
+        p.circle_filled(
+            Pos2::new(center.x, center.y + 7.0),
+            BALL_R * 0.92,
+            Color32::from_rgba_unmultiplied(12, 16, 28, 48),
+        );
+        p.circle_filled(
+            Pos2::new(center.x, center.y + 2.0),
+            BALL_R * 1.08,
+            Color32::from_rgba_unmultiplied(16, 22, 36, 40),
+        );
+        p.circle_filled(
+            center,
+            BALL_R * 1.04,
+            Color32::from_rgba_unmultiplied(20, 28, 42, 36),
+        );
+
         let glow = scene.glow();
         let pulse = 0.85 + 0.15 * (t * TAU / 7.0).sin();
-        for (i, (scale, a_mul)) in [(1.35, 0.35), (1.2, 0.55), (1.08, 0.75)].iter().enumerate() {
+        for (i, (scale, a_mul)) in [(1.28, 0.28), (1.14, 0.48), (1.05, 0.7)].iter().enumerate() {
             let a = ((glow.a() as f32) * a_mul * pulse * (1.0 - i as f32 * 0.12)) as u8;
             p.circle_filled(
                 center,
@@ -1721,13 +1804,18 @@ fn paint_orb(
 
         p.circle_stroke(
             center,
-            BALL_R,
-            Stroke::new(1.2_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 40)),
+            BALL_R + 0.8,
+            Stroke::new(2.6_f32, Color32::from_rgba_unmultiplied(18, 24, 38, 120)),
         );
         p.circle_stroke(
             center,
-            BALL_R - 1.2,
-            Stroke::new(0.8_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 16)),
+            BALL_R,
+            Stroke::new(1.6_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 88)),
+        );
+        p.circle_stroke(
+            center,
+            BALL_R - 1.4,
+            Stroke::new(0.9_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 28)),
         );
     }
 }
@@ -2121,6 +2209,7 @@ fn create_tray(
     window_visible: Arc<AtomicBool>,
     main_hwnd: Arc<AtomicIsize>,
     open_at_login: Arc<AtomicBool>,
+    fullscreen_occluded: Arc<AtomicBool>,
     ctx: egui::Context,
 ) -> Result<TrayUi, Box<dyn std::error::Error>> {
     use tray_icon::TrayIconBuilder;
@@ -2145,6 +2234,7 @@ fn create_tray(
         window_visible,
         main_hwnd,
         open_at_login,
+        fullscreen_occluded,
         tray_hmenu,
         ctx,
     );

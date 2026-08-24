@@ -28,7 +28,7 @@
 
 ### 下载运行
 
-不解源码可直接下载 [`release/weatherball-native-windows.zip`](release/weatherball-native-windows.zip)，解压后双击 `weatherball-native.exe`。
+不解源码可直接下载 [**v0.2.0** 压缩包](release/weatherball-native-windows-v0.2.0.zip)，解压后双击 `weatherball-native.exe`。
 
 ### 自行编译
 
@@ -48,6 +48,7 @@ cd native
 - 悬停看温度、天气、城市；点击展开详情
 - 详情里可刷新天气；点空白处或关闭可收起
 - 系统托盘「天气球」：显示/隐藏、开机自启、退出
+- 视频或游戏全屏时自动隐藏，退出全屏后恢复
 - 不占用任务栏；同一时间只跑一个实例
 - 支持多显示器和不同 DPI
 

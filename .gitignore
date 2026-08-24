@@ -12,9 +12,9 @@ dist
 dist-ssr
 dist-electron
 *.local
-# Neutralino build output — keep the native Windows zip
+# Neutralino build output — keep versioned native Windows zips
 release/*
-!release/weatherball-native-windows.zip
+!release/weatherball-native-windows-v*.zip
 # Rust native prototype
 native/target
 native/run-*.txt
