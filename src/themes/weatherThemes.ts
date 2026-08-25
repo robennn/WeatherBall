@@ -127,18 +127,146 @@ export function getOrbTheme(
   kind: WeatherKind,
   isDay: boolean,
   intensity: PrecipIntensity | null = null,
+  temperature: number | null = null,
 ): OrbTheme {
   if (kind === 'loading') return loadingTheme
   if (kind === 'error') return errorTheme
 
   const base = baseThemes[kind]
   const particles = precipParticles(kind, intensity)
-  const theme: OrbTheme = { ...base, ...particles }
+  let theme: OrbTheme = { ...base, ...particles }
 
-  if (isDay) return theme
+  if (!isDay) {
+    theme = { ...theme, ...nightPalette(kind) }
+  }
 
   return {
     ...theme,
-    glow: theme.glow.replace(/[\d.]+\)$/, (m) => `${(parseFloat(m) * 0.65).toFixed(2)})`),
+    waterA: tintWaterHex(theme.waterA, kind, isDay, temperature),
+    waterB: tintWaterHex(theme.waterB, kind, isDay, temperature),
+  }
+}
+
+function clamp01(n: number) {
+  return Math.min(1, Math.max(0, n))
+}
+
+function parseHex(hex: string): [number, number, number] {
+  const h = hex.replace('#', '')
+  return [
+    parseInt(h.slice(0, 2), 16),
+    parseInt(h.slice(2, 4), 16),
+    parseInt(h.slice(4, 6), 16),
+  ]
+}
+
+function toHex(r: number, g: number, b: number) {
+  const h = (n: number) =>
+    Math.round(Math.min(255, Math.max(0, n)))
+      .toString(16)
+      .padStart(2, '0')
+  return `#${h(r)}${h(g)}${h(b)}`
+}
+
+function mixHex(a: string, b: string, t: number) {
+  const [ar, ag, ab] = parseHex(a)
+  const [br, bg, bb] = parseHex(b)
+  const k = clamp01(t)
+  return toHex(ar + (br - ar) * k, ag + (bg - ag) * k, ab + (bb - ab) * k)
+}
+
+function tintWaterHex(
+  hex: string,
+  kind: Exclude<WeatherKind, 'loading' | 'error'>,
+  isDay: boolean,
+  temperature: number | null,
+): string {
+  if (temperature == null || Number.isNaN(temperature)) return hex
+  const signed = Math.max(-1, Math.min(1, (temperature - 18) / 18))
+  if (Math.abs(signed) < 0.03) return hex
+
+  let coldS = 0.26
+  let warmS = 0.28
+  if (kind === 'clear') {
+    coldS = 0.52
+    warmS = 0.7
+  } else if (kind === 'cloudy') {
+    coldS = 0.3
+    warmS = 0.36
+  } else if (kind === 'fog') {
+    coldS = 0.26
+    warmS = 0.28
+  } else if (kind === 'drizzle' || kind === 'rain') {
+    coldS = 0.2
+    warmS = 0.14
+  } else if (kind === 'snow') {
+    coldS = 0.18
+    warmS = 0.08
+  } else if (kind === 'storm') {
+    coldS = 0.16
+    warmS = 0.1
+  }
+
+  let strength = signed > 0 ? warmS : coldS
+  if (!isDay) strength *= signed > 0 ? 0.72 : 0.85
+  const warm = isDay ? '#d0822a' : '#9a622c'
+  const cold = isDay ? '#2ac8d8' : '#3a90b8'
+  const target = signed > 0 ? warm : cold
+  return mixHex(hex, target, Math.abs(signed) * strength)
+}
+
+function nightPalette(
+  kind: Exclude<WeatherKind, 'loading' | 'error'>,
+): Pick<OrbTheme, 'glow' | 'waterA' | 'waterB' | 'accent'> {
+  switch (kind) {
+    case 'clear':
+      return {
+        glow: 'rgba(170,195,255,0)',
+        waterA: '#1a3a5c',
+        waterB: '#24507a',
+        accent: '#c5d4ff',
+      }
+    case 'cloudy':
+      return {
+        glow: 'rgba(110,145,195,.28)',
+        waterA: '#1c3548',
+        waterB: '#2a4a62',
+        accent: '#9bb4d4',
+      }
+    case 'fog':
+      return {
+        glow: 'rgba(90,110,145,.22)',
+        waterA: '#1a2c38',
+        waterB: '#243848',
+        accent: '#8a9aaa',
+      }
+    case 'drizzle':
+      return {
+        glow: 'rgba(80,130,210,.28)',
+        waterA: '#12243e',
+        waterB: '#1c3860',
+        accent: '#8fb0e8',
+      }
+    case 'rain':
+      return {
+        glow: 'rgba(80,130,210,.34)',
+        waterA: '#12243e',
+        waterB: '#1c3860',
+        accent: '#8fb0e8',
+      }
+    case 'snow':
+      return {
+        glow: 'rgba(150,180,230,.36)',
+        waterA: '#2a4860',
+        waterB: '#3a6080',
+        accent: '#c5d8ec',
+      }
+    case 'storm':
+      return {
+        glow: 'rgba(130,110,220,.38)',
+        waterA: '#12102a',
+        waterB: '#221e48',
+        accent: '#c4b4f5',
+      }
   }
 }

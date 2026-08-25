@@ -63,3 +63,39 @@ export function loadOpenAtLoginPref(): boolean {
 export function saveOpenAtLoginPref(enabled: boolean): void {
   localStorage.setItem(AUTOSTART_KEY, enabled ? '1' : '0')
 }
+
+const DAY_NIGHT_KEY = 'weatherball.dayNight'
+
+export type DayNightPref = 'auto' | 'day' | 'night'
+
+export function loadDayNightPref(): DayNightPref {
+  try {
+    const raw = localStorage.getItem(DAY_NIGHT_KEY)
+    if (raw === 'day' || raw === 'night' || raw === 'auto') return raw
+  } catch {
+    /* ignore */
+  }
+  return 'auto'
+}
+
+export function saveDayNightPref(pref: DayNightPref): void {
+  localStorage.setItem(DAY_NIGHT_KEY, pref)
+}
+
+export function cycleDayNightPref(pref: DayNightPref): DayNightPref {
+  if (pref === 'auto') return 'night'
+  if (pref === 'night') return 'day'
+  return 'auto'
+}
+
+export function applyDayNightPref(pref: DayNightPref, apiIsDay: boolean): boolean {
+  if (pref === 'day') return true
+  if (pref === 'night') return false
+  return apiIsDay
+}
+
+export function dayNightLabel(pref: DayNightPref): string {
+  if (pref === 'day') return '日间'
+  if (pref === 'night') return '夜间'
+  return '自动'
+}

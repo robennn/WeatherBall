@@ -5,18 +5,126 @@ use std::path::PathBuf;
 
 const RUN_VALUE_NAME: &str = "WeatherBall";
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DayNightPref {
+    #[default]
+    Auto,
+    Day,
+    Night,
+}
+
+impl DayNightPref {
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Auto => Self::Night,
+            Self::Night => Self::Day,
+            Self::Day => Self::Auto,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "自动",
+            Self::Day => "日间",
+            Self::Night => "夜间",
+        }
+    }
+
+    pub fn apply(self, api_is_day: bool) -> bool {
+        match self {
+            Self::Auto => api_is_day,
+            Self::Day => true,
+            Self::Night => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManualCity {
+    pub latitude: f64,
+    pub longitude: f64,
+    pub label: String,
+}
+
+pub const BALL_SCALE_MIN: f32 = 0.70;
+pub const BALL_SCALE_MAX: f32 = 1.15;
+pub const BALL_OPACITY_MIN: f32 = 0.35;
+pub const BALL_OPACITY_MAX: f32 = 1.00;
+
+fn default_ball_scale() -> f32 {
+    1.0
+}
+
+fn default_ball_opacity() -> f32 {
+    1.0
+}
+
+fn default_panel_skin() -> String {
+    "default".into()
+}
+
+pub fn clamp_ball_scale(v: f32) -> f32 {
+    if v.is_finite() {
+        v.clamp(BALL_SCALE_MIN, BALL_SCALE_MAX)
+    } else {
+        1.0
+    }
+}
+
+pub fn clamp_ball_opacity(v: f32) -> f32 {
+    if v.is_finite() {
+        v.clamp(BALL_OPACITY_MIN, BALL_OPACITY_MAX)
+    } else {
+        1.0
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub x: Option<i32>,
     pub y: Option<i32>,
     #[serde(default)]
     pub open_at_login: bool,
+    #[serde(default)]
+    pub day_night: DayNightPref,
+    #[serde(default)]
+    pub debug_mode: bool,
+    #[serde(default)]
+    pub lock_position: bool,
+    #[serde(default)]
+    pub manual_city: Option<ManualCity>,
+    #[serde(default = "default_ball_scale")]
+    pub ball_scale: f32,
+    #[serde(default = "default_ball_opacity")]
+    pub ball_opacity: f32,
+    #[serde(default = "default_panel_skin")]
+    pub panel_skin: String,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            x: None,
+            y: None,
+            open_at_login: false,
+            day_night: DayNightPref::default(),
+            debug_mode: false,
+            lock_position: false,
+            manual_city: None,
+            ball_scale: 1.0,
+            ball_opacity: 1.0,
+            panel_skin: default_panel_skin(),
+        }
+    }
 }
 
 impl AppSettings {
     pub fn load() -> Self {
         let mut s = Self::load_file().unwrap_or_default();
         s.open_at_login = is_open_at_login();
+        s.ball_scale = clamp_ball_scale(s.ball_scale);
+        s.ball_opacity = clamp_ball_opacity(s.ball_opacity);
         s
     }
 
@@ -65,6 +173,76 @@ pub fn set_open_at_login(enable: bool) -> bool {
     s.open_at_login = enabled;
     s.save();
     enabled
+}
+
+pub fn save_day_night(pref: DayNightPref) {
+    let mut s = AppSettings::load_file().unwrap_or_default();
+    s.day_night = pref;
+    s.save();
+}
+
+pub fn save_debug_mode(enabled: bool) {
+    let mut s = AppSettings::load_file().unwrap_or_default();
+    s.debug_mode = enabled;
+    s.save();
+}
+
+pub fn save_lock_position(enabled: bool) {
+    let mut s = AppSettings::load_file().unwrap_or_default();
+    s.lock_position = enabled;
+    s.save();
+}
+
+pub fn save_ball_scale(scale: f32) {
+    let mut s = AppSettings::load_file().unwrap_or_default();
+    s.ball_scale = clamp_ball_scale(scale);
+    s.save();
+}
+
+pub fn save_ball_opacity(opacity: f32) {
+    let mut s = AppSettings::load_file().unwrap_or_default();
+    s.ball_opacity = clamp_ball_opacity(opacity);
+    s.save();
+}
+
+pub fn save_panel_skin(id: &str) {
+    let id = id.trim();
+    if id.is_empty() {
+        return;
+    }
+    let mut s = AppSettings::load_file().unwrap_or_default();
+    s.panel_skin = id.to_string();
+    s.save();
+}
+
+pub fn load_manual_city() -> Option<ManualCity> {
+    let c = AppSettings::load_file()?.manual_city?;
+    if !c.label.trim().is_empty()
+        && c.latitude.is_finite()
+        && c.longitude.is_finite()
+        && c.latitude.abs() <= 90.0
+        && c.longitude.abs() <= 180.0
+    {
+        Some(ManualCity {
+            latitude: c.latitude,
+            longitude: c.longitude,
+            label: c.label.trim().to_string(),
+        })
+    } else {
+        None
+    }
+}
+
+pub fn save_manual_city(city: ManualCity) {
+    let mut s = AppSettings::load_file().unwrap_or_default();
+    s.manual_city = Some(city);
+    s.save();
+}
+
+pub fn clear_manual_city() {
+    let mut s = AppSettings::load_file().unwrap_or_default();
+    s.manual_city = None;
+    s.save();
 }
 
 fn settings_path() -> Option<PathBuf> {

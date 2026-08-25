@@ -12,6 +12,35 @@ pub struct HourlyPoint {
     pub temperature: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrecipSoonKind {
+    Rain,
+    Storm,
+    Snow,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PrecipSoon {
+    /// Rough lead time: 60 or 120.
+    pub minutes: u16,
+    pub kind: PrecipSoonKind,
+}
+
+impl PrecipSoon {
+    pub fn hint(self) -> String {
+        let when = if self.minutes <= 75 {
+            "约1小时内"
+        } else {
+            "约2小时内"
+        };
+        match self.kind {
+            PrecipSoonKind::Rain => format!("{when}有雨"),
+            PrecipSoonKind::Storm => format!("{when}有雷雨"),
+            PrecipSoonKind::Snow => format!("{when}有雪"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LiveWeather {
     pub temperature: f32,
@@ -21,7 +50,10 @@ pub struct LiveWeather {
     pub description: String,
     pub city: String,
     pub scene: Scene,
+    /// Open-Meteo `is_day` (solar elevation at the located coords).
+    pub is_day: bool,
     pub hourly: Vec<HourlyPoint>,
+    pub rain_soon: Option<PrecipSoon>,
     pub fetched_at_ms: u64,
     /// Local `HH:MM` captured when this snapshot was fetched.
     pub updated_hm: String,
@@ -57,12 +89,24 @@ struct OpenMeteoCurrent {
     wind_speed_10m: Option<f32>,
     weather_code: i32,
     precipitation: Option<f32>,
+    #[serde(default = "default_is_day")]
+    is_day: i32,
+}
+
+fn default_is_day() -> i32 {
+    1
 }
 
 #[derive(Deserialize)]
 struct OpenMeteoHourly {
     time: Vec<String>,
     temperature_2m: Vec<f32>,
+    #[serde(default)]
+    precipitation_probability: Vec<f32>,
+    #[serde(default)]
+    precipitation: Vec<f32>,
+    #[serde(default)]
+    weather_code: Vec<i32>,
 }
 
 struct CachedLoc {
@@ -80,11 +124,26 @@ fn lock_loc() -> std::sync::MutexGuard<'static, Option<CachedLoc>> {
 }
 
 pub fn refresh_blocking() -> Result<LiveWeather, String> {
-    let (lat, lon, city) = resolve_location();
+    refresh_at(resolve_location())
+}
+
+pub fn refresh_force_locate() -> Result<LiveWeather, String> {
+    *lock_loc() = None;
+    refresh_at(resolve_ip_or_fallback())
+}
+
+pub fn refresh_at_coords(lat: f64, lon: f64, city: String) -> Result<LiveWeather, String> {
+    refresh_at((lat, lon, city))
+}
+
+fn refresh_at((lat, lon, city): (f64, f64, String)) -> Result<LiveWeather, String> {
     fetch_weather(lat, lon, city)
 }
 
 fn resolve_location() -> (f64, f64, String) {
+    if let Some(c) = crate::settings::load_manual_city() {
+        return (c.latitude, c.longitude, c.label);
+    }
     {
         let g = lock_loc();
         if let Some(c) = g.as_ref() {
@@ -93,7 +152,10 @@ fn resolve_location() -> (f64, f64, String) {
             }
         }
     }
+    resolve_ip_or_fallback()
+}
 
+fn resolve_ip_or_fallback() -> (f64, f64, String) {
     match locate_from_ip() {
         Some((lat, lon, rough)) => {
             let city = reverse_geocode(lat, lon).unwrap_or(rough);
@@ -209,7 +271,7 @@ fn fetch_weather(lat: f64, lon: f64, city: String) -> Result<LiveWeather, String
     let url = format!(
         "https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}\
          &current=temperature_2m,apparent_temperature,weather_code,is_day,precipitation,relative_humidity_2m,wind_speed_10m\
-         &hourly=temperature_2m&forecast_hours=14&timezone=auto"
+         &hourly=temperature_2m,precipitation_probability,precipitation,weather_code&forecast_hours=14&timezone=auto"
     );
 
     let agent = ureq::AgentBuilder::new()
@@ -235,6 +297,8 @@ fn fetch_weather(lat: f64, lon: f64, city: String) -> Result<LiveWeather, String
     let intensity = refine_intensity(mapped.kind, mapped.intensity, precip);
     let scene = kind_to_scene(mapped.kind, intensity);
     let hourly = parse_hourly(data.hourly.as_ref());
+    let already_wet = scene.is_precip_rain() || scene.is_snow() || precip >= 0.3;
+    let rain_soon = detect_precip_soon(data.hourly.as_ref(), already_wet);
 
     let fetched_at_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -252,7 +316,9 @@ fn fetch_weather(lat: f64, lon: f64, city: String) -> Result<LiveWeather, String
         description: mapped.description.to_string(),
         city,
         scene,
+        is_day: data.current.is_day != 0,
         hourly,
+        rain_soon,
         fetched_at_ms,
         updated_hm: local_hm_now(),
     })
@@ -289,24 +355,46 @@ fn local_hm_now() -> String {
     }
 }
 
+/// Used before the first forecast arrives.
+pub fn local_is_day_guess() -> bool {
+    local_hour().map(|h| (6..19).contains(&h)).unwrap_or(true)
+}
+
+fn local_hour() -> Option<u16> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::mem::MaybeUninit;
+        #[repr(C)]
+        struct SystemTime {
+            w_year: u16,
+            w_month: u16,
+            w_day_of_week: u16,
+            w_day: u16,
+            w_hour: u16,
+            w_minute: u16,
+            w_second: u16,
+            w_milliseconds: u16,
+        }
+        extern "system" {
+            fn GetLocalTime(time: *mut SystemTime);
+        }
+        let mut st = MaybeUninit::<SystemTime>::uninit();
+        unsafe {
+            GetLocalTime(st.as_mut_ptr());
+            Some(st.assume_init().w_hour)
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
 fn parse_hourly(hourly: Option<&OpenMeteoHourly>) -> Vec<HourlyPoint> {
     let Some(h) = hourly else {
         return Vec::new();
     };
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-
-    let mut start = 0usize;
-    for (i, t) in h.time.iter().enumerate() {
-        if let Ok(dt) = chrono_ish_parse_ms(t) {
-            if dt >= now - 30 * 60 * 1000 {
-                start = i;
-                break;
-            }
-        }
-    }
+    let start = hourly_start_index(h);
 
     let mut out = Vec::new();
     for i in start..h.time.len() {
@@ -326,6 +414,58 @@ fn parse_hourly(hourly: Option<&OpenMeteoHourly>) -> Vec<HourlyPoint> {
         });
     }
     out
+}
+
+fn hourly_start_index(h: &OpenMeteoHourly) -> usize {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    for (i, t) in h.time.iter().enumerate() {
+        if let Ok(dt) = chrono_ish_parse_ms(t) {
+            if dt >= now - 30 * 60 * 1000 {
+                return i;
+            }
+        }
+    }
+    0
+}
+
+fn detect_precip_soon(hourly: Option<&OpenMeteoHourly>, already_wet: bool) -> Option<PrecipSoon> {
+    if already_wet {
+        return None;
+    }
+    let h = hourly?;
+    let start = hourly_start_index(h);
+    for offset in 1..=2 {
+        let i = start + offset;
+        if i >= h.time.len() {
+            break;
+        }
+        let code = h.weather_code.get(i).copied().unwrap_or(-1);
+        let prob = h.precipitation_probability.get(i).copied().unwrap_or(0.0);
+        let amt = h.precipitation.get(i).copied().unwrap_or(0.0);
+        let from_code = precip_kind_from_code(code);
+        let likely = from_code.is_some() || amt >= 0.15 || prob >= 60.0;
+        if !likely {
+            continue;
+        }
+        let kind = from_code.unwrap_or(PrecipSoonKind::Rain);
+        return Some(PrecipSoon {
+            minutes: (offset as u16) * 60,
+            kind,
+        });
+    }
+    None
+}
+
+fn precip_kind_from_code(code: i32) -> Option<PrecipSoonKind> {
+    match code {
+        51..=57 | 61..=67 | 80..=82 => Some(PrecipSoonKind::Rain),
+        95 | 96 | 99 => Some(PrecipSoonKind::Storm),
+        71..=77 | 85 | 86 => Some(PrecipSoonKind::Snow),
+        _ => None,
+    }
 }
 
 /// Minimal RFC3339 / Open-Meteo local time parse → unix ms (best-effort).

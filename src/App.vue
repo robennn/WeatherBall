@@ -7,6 +7,13 @@ import type { PrecipIntensity, WeatherKind } from './services/weather'
 import type { CityOption } from './services/cities'
 import { getOrbTheme } from './themes/weatherThemes'
 import { getDesktopApi } from './platform'
+import {
+  applyDayNightPref,
+  cycleDayNightPref,
+  loadDayNightPref,
+  saveDayNightPref,
+  type DayNightPref,
+} from './services/appSettings'
 
 const COMPACT = { w: 160, h: 204 }
 const EXPANDED = { w: 160, h: 520 }
@@ -34,9 +41,10 @@ const PREVIEW_ITEMS: PreviewItem[] = [
 
 const { weather, loading, error, coords, refresh, setCity, useAutoLocation } = useWeather()
 
-/** Dev-only style cycler; production off unless VITE_SHOW_PREVIEW=true */
-const showPreview =
-  import.meta.env.DEV || import.meta.env.VITE_SHOW_PREVIEW === 'true'
+const dayNight = ref<DayNightPref>(loadDayNightPref())
+
+/** Temporarily always on so scene cycling is easy to try */
+const showPreview = true
 
 /** null = live weather; otherwise index into PREVIEW_ITEMS */
 const previewIndex = ref<number | null>(null)
@@ -109,11 +117,17 @@ const locationHint = computed(() => {
 const cityName = computed(() => weather.value?.city ?? coords.value?.label ?? '定位中…')
 const isManualCity = computed(() => coords.value?.source === 'manual')
 
+const visualIsDay = computed(() => {
+  if (previewIndex.value !== null) return true
+  return applyDayNightPref(dayNight.value, weather.value?.isDay ?? true)
+})
+
 const accentStyle = computed(() => ({
   '--accent': getOrbTheme(
     kind.value,
-    previewIndex.value === null ? (weather.value?.isDay ?? true) : true,
+    visualIsDay.value,
     intensity.value,
+    weather.value?.temperature ?? null,
   ).accent,
 }))
 
@@ -137,6 +151,11 @@ function toggleDetail() {
 function closeDetail() {
   detailOpen.value = false
   cityPicking.value = false
+}
+
+function onCycleDayNight() {
+  dayNight.value = cycleDayNightPref(dayNight.value)
+  saveDayNightPref(dayNight.value)
 }
 
 function onRefresh() {
@@ -206,7 +225,7 @@ function onTestPointerLeave() {
     <WeatherBall
       :kind="kind"
       :intensity="intensity"
-      :is-day="previewIndex === null ? (weather?.isDay ?? true) : true"
+      :is-day="visualIsDay"
       :temperature="weather?.temperature ?? 26"
       :description="description"
       :loading="previewIndex === null && loading && !weather"
@@ -229,11 +248,13 @@ function onTestPointerLeave() {
       :loading="loading"
       :is-manual-city="isManualCity"
       :update-failed="!!error && !!weather"
+      :day-night="dayNight"
       @close="closeDetail"
       @refresh="onRefresh"
       @select-city="onSelectCity"
       @use-locate="onUseLocate"
       @picker-change="cityPicking = $event"
+      @cycle-day-night="onCycleDayNight"
     />
 
     <button

@@ -8,6 +8,7 @@ import {
 } from '../services/cities'
 import type { HourlyPoint } from '../services/weather'
 import HourlyCurve from './HourlyCurve.vue'
+import { dayNightLabel } from '../services/appSettings'
 
 const props = defineProps<{
   open: boolean
@@ -24,6 +25,7 @@ const props = defineProps<{
   isManualCity?: boolean
   /** Last refresh failed; showing cached data */
   updateFailed?: boolean
+  dayNight?: 'auto' | 'day' | 'night'
 }>()
 
 const emit = defineEmits<{
@@ -32,6 +34,7 @@ const emit = defineEmits<{
   'select-city': [city: CityOption]
   'use-locate': []
   'picker-change': [open: boolean]
+  'cycle-day-night': []
 }>()
 
 const picking = ref(false)
@@ -56,6 +59,8 @@ const windText = computed(() => {
   if (props.windSpeed == null) return '风速 --'
   return `风速 ${Math.round(props.windSpeed)} km/h`
 })
+
+const dayNightText = computed(() => dayNightLabel(props.dayNight ?? 'auto'))
 
 const humidityText = computed(() => {
   if (props.humidity == null) return '湿度 --'
@@ -178,6 +183,13 @@ function onClose() {
       <button
         type="button"
         class="refresh"
+        @click="emit('cycle-day-night')"
+      >
+        <span>外观 {{ dayNightText }}</span>
+      </button>
+      <button
+        type="button"
+        class="refresh"
         :class="{ loading }"
         :disabled="loading"
         @click="emit('refresh')"
@@ -196,13 +208,13 @@ function onClose() {
         class="search"
         type="search"
         enterkeyhint="search"
-        placeholder="搜索城市…"
+        placeholder="搜索城市或区县…"
         :value="query"
         @input="query = ($event.target as HTMLInputElement).value; onQueryInput()"
       />
       <div class="city-list" role="listbox" aria-label="城市列表">
         <div v-if="searching" class="list-hint">搜索中…</div>
-        <div v-else-if="!results.length" class="list-hint">未找到城市</div>
+        <div v-else-if="!results.length" class="list-hint">未找到城市或区县</div>
         <button
           v-for="c in results"
           :key="`${c.name}-${c.latitude}-${c.longitude}`"
@@ -406,7 +418,7 @@ function onClose() {
 }
 
 .refresh {
-  margin-top: 12px;
+  margin-top: 8px;
   width: 100%;
   display: flex;
   align-items: center;

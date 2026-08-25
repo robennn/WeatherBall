@@ -24,7 +24,9 @@ const props = defineProps({
 const emit = defineEmits<{ refresh: []; 'toggle-detail': [] }>()
 
 const hovered = ref(false)
-const theme = computed(() => getOrbTheme(props.kind, props.isDay, props.intensity))
+const theme = computed(() =>
+  getOrbTheme(props.kind, props.isDay, props.intensity, props.temperature),
+)
 const scene = computed(() => theme.value.scene)
 /** When true, particle / sun / bolt layers fade out before rebuild */
 const fxOut = ref(false)
@@ -235,7 +237,7 @@ watch(
 <template>
   <div
     class="ball-root"
-    :class="{ loading }"
+    :class="{ loading, night: !isDay, 'clear-night': !isDay && scene === 'sunny' }"
     :style="cssVars()"
     @contextmenu="onContextMenu"
   >
@@ -260,12 +262,12 @@ watch(
     >
       <div class="glow" />
       <div class="glass">
-        <div class="interior">
+        <div class="interior" :class="{ 'night-sky': !isDay && isOn('sunny') }">
           <!-- 晴 -->
           <div class="layer" :class="{ on: isOn('sunny') }">
             <div class="fx" :class="{ out: fxOut }">
-              <div class="sun-rays" />
-              <div class="sun-core" />
+              <div class="sun-rays" :class="{ moon: !isDay }" />
+              <div class="sun-core" :class="{ moon: !isDay }" />
               <span
                 v-for="(m, i) in motes"
                 :key="'m' + i"
@@ -425,6 +427,10 @@ watch(
   overflow: hidden;
 }
 
+.interior.night-sky {
+  background: radial-gradient(circle at 50% 38%, #1c2740 0%, #0e1426 72%);
+}
+
 .highlight {
   position: absolute;
   top: 9%;
@@ -539,6 +545,53 @@ watch(
     0 0 16px rgba(255, 190, 80, 0.75),
     0 0 36px rgba(255, 170, 60, 0.4);
   animation: sunPulse 4.5s ease-in-out infinite;
+}
+
+.sun-rays.moon {
+  display: none;
+}
+
+.sun-core.moon {
+  width: 28%;
+  height: 28%;
+  top: 14%;
+  left: 58%;
+  transform: translateX(-50%);
+  overflow: hidden;
+  background: radial-gradient(
+    circle at 36% 34%,
+    #f7f9ff,
+    #d8deec 55%,
+    #c5cde0 82%
+  );
+  box-shadow: 0 0 8px rgba(220, 230, 255, 0.28);
+  animation: none;
+}
+
+.sun-core.moon::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: #0e1426;
+  transform: translate(32%, -18%);
+}
+
+.ball-root.clear-night .glow {
+  opacity: 0;
+}
+
+.ball-root.clear-night .highlight,
+.ball-root.clear-night .rim {
+  opacity: 0.28;
+}
+
+.ball-root.night .mote {
+  background: radial-gradient(circle, rgba(210, 225, 255, 0.9), transparent 70%);
+}
+
+.ball-root.night .cloud {
+  filter: brightness(0.78) saturate(0.82);
 }
 
 .mote {

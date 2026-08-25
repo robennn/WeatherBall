@@ -1,6 +1,6 @@
 //! Per-monitor DPI and work-area helpers (Windows).
 
-use crate::{BALL_CENTER_Y, BALL_R, H_DETAIL, W};
+use crate::{BALL_CENTER_Y, H_DETAIL, W};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -17,13 +17,6 @@ pub struct WorkArea {
 impl WorkArea {
     fn contains(&self, x: i32, y: i32) -> bool {
         x >= self.left && x < self.right && y >= self.top && y < self.bottom
-    }
-
-    fn center(&self) -> (i32, i32) {
-        (
-            self.left + (self.right - self.left) / 2,
-            self.top + (self.bottom - self.top) / 2,
-        )
     }
 }
 
@@ -217,68 +210,50 @@ pub fn physical_to_logical_pos(x: i32, y: i32) -> [f32; 2] {
 }
 
 fn clamp_sized(x: i32, y: i32, win_w: i32, win_h: i32, scale: f32, fresh: bool) -> (i32, i32) {
+    let _ = win_h;
     let monitors = work_areas_cached(fresh);
     if monitors.is_empty() {
         return (x, y);
     }
     let ball_cx = win_w / 2;
     let ball_cy = (BALL_CENTER_Y * scale).round() as i32;
-    let radius = ((BALL_R + 8.0) * scale).round() as i32;
     let bx = x + ball_cx;
     let by = y + ball_cy;
-    let target = pick_monitor(&monitors, bx, by, x, y, win_w, win_h);
-    let min_bx = target.left + radius;
-    let max_bx = (target.right - radius).max(min_bx);
-    let min_by = target.top + radius;
-    let max_by = (target.bottom - radius).max(min_by);
-    (bx.clamp(min_bx, max_bx) - ball_cx, by.clamp(min_by, max_by) - ball_cy)
+
+    // Stay put if the orb is already on a screen. Do not clamp to a single
+    // monitor's interior — that builds a wall at the bezel and fights
+    // dragging onto the next display.
+    if monitors.iter().any(|m| m.contains(bx, by)) {
+        return (x, y);
+    }
+
+    // Off every work area: snap onto the screen under the cursor, else nearest.
+    let (nx, ny) = if let Some(m) = cursor_work_area(&monitors) {
+        (
+            bx.clamp(m.left, (m.right - 1).max(m.left)),
+            by.clamp(m.top, (m.bottom - 1).max(m.top)),
+        )
+    } else {
+        nearest_on_work_areas(bx, by, &monitors)
+    };
+    (nx - ball_cx, ny - ball_cy)
 }
 
-fn pick_monitor(
-    monitors: &[WorkArea],
-    bx: i32,
-    by: i32,
-    x: i32,
-    y: i32,
-    win_w: i32,
-    win_h: i32,
-) -> WorkArea {
-    if let Some(&m) = monitors.iter().find(|m| m.contains(bx, by)) {
-        return m;
-    }
-    let mut best = monitors[0];
-    let mut best_area = -1i64;
-    for &m in monitors {
-        let area = intersect_area(x, y, win_w, win_h, &m);
-        if area > best_area {
-            best_area = area;
-            best = m;
-        }
-    }
-    if best_area > 0 {
-        return best;
-    }
-    let mut nearest = monitors[0];
-    let mut nearest_d = i64::MAX;
-    for &m in monitors {
-        let (cx, cy) = m.center();
-        let dx = (bx - cx) as i64;
-        let dy = (by - cy) as i64;
+fn nearest_on_work_areas(px: i32, py: i32, monitors: &[WorkArea]) -> (i32, i32) {
+    let mut best = (px, py);
+    let mut best_d = i64::MAX;
+    for m in monitors {
+        let nx = px.clamp(m.left, (m.right - 1).max(m.left));
+        let ny = py.clamp(m.top, (m.bottom - 1).max(m.top));
+        let dx = (nx - px) as i64;
+        let dy = (ny - py) as i64;
         let d = dx * dx + dy * dy;
-        if d < nearest_d {
-            nearest_d = d;
-            nearest = m;
+        if d < best_d {
+            best_d = d;
+            best = (nx, ny);
         }
     }
-    nearest
-}
-
-fn intersect_area(x: i32, y: i32, w: i32, h: i32, m: &WorkArea) -> i64 {
-    let x1 = x.max(m.left);
-    let y1 = y.max(m.top);
-    let x2 = (x + w).min(m.right);
-    let y2 = (y + h).min(m.bottom);
-    (x2 - x1).max(0) as i64 * (y2 - y1).max(0) as i64
+    best
 }
 
 fn cursor_work_area(areas: &[WorkArea]) -> Option<WorkArea> {
