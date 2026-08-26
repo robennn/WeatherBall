@@ -155,7 +155,7 @@ impl Scene {
                 Scene::Drizzle => Color32::from_rgba_unmultiplied(90, 150, 230, 82),
                 _ => Color32::from_rgba_unmultiplied(90, 150, 230, 102),
             },
-            OrbKind::Snow => Color32::from_rgba_unmultiplied(200, 230, 255, 107),
+            OrbKind::Snow => Color32::from_rgba_unmultiplied(130, 175, 220, 100),
             OrbKind::Storm => Color32::from_rgba_unmultiplied(150, 120, 240, 107),
         }
     }
@@ -176,7 +176,7 @@ impl Scene {
             OrbKind::Cloudy => Color32::from_rgb(0x3d, 0x7b, 0xa3),
             OrbKind::Overcast => Color32::from_rgb(0x4c, 0x6a, 0x80),
             OrbKind::Rain => Color32::from_rgb(0x2c, 0x5d, 0x92),
-            OrbKind::Snow => Color32::from_rgb(0x7f, 0xb8, 0xd8),
+            OrbKind::Snow => Color32::from_rgb(0x4e, 0x8a, 0xb0),
             OrbKind::Storm => Color32::from_rgb(0x2e, 0x35, 0x60),
         }
     }
@@ -197,8 +197,30 @@ impl Scene {
             OrbKind::Cloudy => Color32::from_rgb(0x5a, 0x9c, 0xc4),
             OrbKind::Overcast => Color32::from_rgb(0x68, 0x85, 0x9a),
             OrbKind::Rain => Color32::from_rgb(0x3f, 0x78, 0xb4),
-            OrbKind::Snow => Color32::from_rgb(0xa5, 0xd4, 0xec),
+            OrbKind::Snow => Color32::from_rgb(0x68, 0xa8, 0xcc),
             OrbKind::Storm => Color32::from_rgb(0x41, 0x4a, 0x82),
+        }
+    }
+
+    /// Opaque sky disc behind water so light wallpapers cannot punch through the orb.
+    fn sky(self, is_day: bool) -> Color32 {
+        if !is_day {
+            return match self.orb_kind() {
+                OrbKind::Sunny => Color32::from_rgb(0x0e, 0x14, 0x26),
+                OrbKind::Cloudy => Color32::from_rgb(0x16, 0x20, 0x2c),
+                OrbKind::Overcast => Color32::from_rgb(0x14, 0x18, 0x22),
+                OrbKind::Rain => Color32::from_rgb(0x10, 0x18, 0x28),
+                OrbKind::Snow => Color32::from_rgb(0x18, 0x26, 0x36),
+                OrbKind::Storm => Color32::from_rgb(0x10, 0x0e, 0x20),
+            };
+        }
+        match self.orb_kind() {
+            OrbKind::Sunny => Color32::from_rgb(0x6e, 0xb8, 0xdc),
+            OrbKind::Cloudy => Color32::from_rgb(0x6a, 0x96, 0xb4),
+            OrbKind::Overcast => Color32::from_rgb(0x62, 0x76, 0x8a),
+            OrbKind::Rain => Color32::from_rgb(0x48, 0x68, 0x8c),
+            OrbKind::Snow => Color32::from_rgb(0x52, 0x7e, 0x9e),
+            OrbKind::Storm => Color32::from_rgb(0x3a, 0x42, 0x66),
         }
     }
 
@@ -281,18 +303,40 @@ impl Scene {
 }
 
 /// Click-to-try orb scenes (mirrors Vue `PREVIEW_ITEMS`). Right-click restores live weather.
-const PREVIEW_SCENES: [(Scene, &'static str); 11] = [
-    (Scene::Sunny, "晴"),
-    (Scene::Cloudy, "多云"),
-    (Scene::Overcast, "阴"),
-    (Scene::Drizzle, "小毛毛雨"),
-    (Scene::Rain(Intensity::Light), "小雨"),
-    (Scene::Rain(Intensity::Moderate), "中雨"),
-    (Scene::Rain(Intensity::Heavy), "大雨"),
-    (Scene::Snow(Intensity::Light), "小雪"),
-    (Scene::Snow(Intensity::Heavy), "大雪"),
-    (Scene::Storm(Intensity::Moderate), "雷阵雨"),
-    (Scene::Storm(Intensity::Heavy), "强雷暴"),
+#[derive(Clone, Copy)]
+struct PreviewScene {
+    scene: Scene,
+    label: &'static str,
+    rain_soon: Option<PrecipSoon>,
+}
+
+const PREVIEW_SCENES: [PreviewScene; 14] = [
+    PreviewScene { scene: Scene::Sunny, label: "晴", rain_soon: None },
+    PreviewScene { scene: Scene::Cloudy, label: "多云", rain_soon: None },
+    PreviewScene { scene: Scene::Overcast, label: "阴", rain_soon: None },
+    PreviewScene { scene: Scene::Drizzle, label: "小毛毛雨", rain_soon: None },
+    PreviewScene { scene: Scene::Rain(Intensity::Light), label: "小雨", rain_soon: None },
+    PreviewScene { scene: Scene::Rain(Intensity::Moderate), label: "中雨", rain_soon: None },
+    PreviewScene { scene: Scene::Rain(Intensity::Heavy), label: "大雨", rain_soon: None },
+    PreviewScene { scene: Scene::Snow(Intensity::Light), label: "小雪", rain_soon: None },
+    PreviewScene { scene: Scene::Snow(Intensity::Heavy), label: "大雪", rain_soon: None },
+    PreviewScene { scene: Scene::Storm(Intensity::Moderate), label: "雷阵雨", rain_soon: None },
+    PreviewScene { scene: Scene::Storm(Intensity::Heavy), label: "强雷暴", rain_soon: None },
+    PreviewScene {
+        scene: Scene::Sunny,
+        label: "雨预警",
+        rain_soon: Some(PrecipSoon { minutes: 60, kind: PrecipSoonKind::Rain }),
+    },
+    PreviewScene {
+        scene: Scene::Sunny,
+        label: "雷雨预警",
+        rain_soon: Some(PrecipSoon { minutes: 60, kind: PrecipSoonKind::Storm }),
+    },
+    PreviewScene {
+        scene: Scene::Cloudy,
+        label: "雪预警",
+        rain_soon: Some(PrecipSoon { minutes: 60, kind: PrecipSoonKind::Snow }),
+    },
 ];
 
 /// Click-to-try water tint. Right-click restores live temperature.
@@ -1131,7 +1175,7 @@ impl eframe::App for OrbApp {
         };
         let want_scene = if self.debug_mode {
             match self.preview_index {
-                Some(i) => PREVIEW_SCENES[i].0,
+                Some(i) => PREVIEW_SCENES[i].scene,
                 None => self.applied_scene.unwrap_or(self.scene),
             }
         } else {
@@ -1139,11 +1183,18 @@ impl eframe::App for OrbApp {
         };
         self.tick_scene_fade(dt, want_scene, want_day);
         let bob = (t * TAU / 5.5).sin() * 2.5;
-        let rain_hint = rain_soon.filter(|_| {
-            !self.debug_mode
-                && !self.scene.is_precip_rain()
-                && !self.scene.is_snow()
-        });
+        let rain_hint = if self.debug_mode {
+            match self.preview_index {
+                Some(i) => PREVIEW_SCENES[i].rain_soon,
+                None => rain_soon.filter(|_| {
+                    !self.scene.is_precip_rain() && !self.scene.is_snow()
+                }),
+            }
+        } else {
+            rain_soon.filter(|_| {
+                !self.scene.is_precip_rain() && !self.scene.is_snow()
+            })
+        };
 
         match self.scene {
             s if s.is_precip_rain() => {
@@ -1290,6 +1341,7 @@ impl eframe::App for OrbApp {
                                     self.day_night,
                                     self.is_manual_city,
                                     self.debug_mode,
+                                    rain_hint,
                                     &mut self.city_picker,
                                     theme,
                                     skin_tex_ref,
@@ -1706,7 +1758,7 @@ impl OrbApp {
         match self.preview_index {
             None => "试样式".into(),
             Some(i) => {
-                let name = PREVIEW_SCENES[i].1;
+                let name = PREVIEW_SCENES[i].label;
                 format!("{name} {}/{}", i + 1, PREVIEW_SCENES.len())
             }
         }
@@ -2621,7 +2673,7 @@ impl PanelTheme {
             curve_halo: Color32::from_rgba_unmultiplied(90, 118, 188, 80),
             curve_dot: Color32::from_rgb(255, 252, 255),
             scroll_track: Color32::from_rgba_unmultiplied(46, 40, 62, 28),
-            rain: Color32::from_rgb(64, 96, 168),
+            rain: Color32::from_rgb(24, 72, 168),
             list_hover: Color32::from_rgba_unmultiplied(255, 255, 255, 96),
         }
     }
@@ -2652,6 +2704,7 @@ fn paint_detail_panel(
     day_night: settings::DayNightPref,
     is_manual: bool,
     debug_mode: bool,
+    rain_soon: Option<PrecipSoon>,
     picker: &mut CityPicker,
     theme: PanelTheme,
     skin_tex: Option<&TextureHandle>,
@@ -2809,7 +2862,7 @@ fn paint_detail_panel(
     }
     y += 20.0;
 
-    if let Some(soon) = data.and_then(|d| d.rain_soon) {
+    if let Some(soon) = rain_soon {
         let p = ui.painter();
         p.text(
             Pos2::new(inner.min.x, y),
@@ -4506,20 +4559,35 @@ fn paint_orb(
         }
 
         if let Some(soon) = rain_soon {
-            let pulse = 0.50 + 0.50 * (0.5 + 0.5 * (t * TAU / 2.4).sin());
-            let (cr, cg, cb, base_a) = match soon.kind {
-                PrecipSoonKind::Storm => (168, 140, 255, 92.0),
-                PrecipSoonKind::Snow => (210, 230, 255, 78.0),
-                PrecipSoonKind::Rain => (90, 168, 255, 88.0),
+            // Soft wash + thin ring. Dark hairline keeps it readable on white
+            // wallpapers without a heavy colored disc.
+            let pulse = 0.82 + 0.18 * (0.5 + 0.5 * (t * TAU / 2.8).sin());
+            let (cr, cg, cb) = match soon.kind {
+                PrecipSoonKind::Storm => (148, 128, 228),
+                PrecipSoonKind::Snow => (110, 164, 214),
+                PrecipSoonKind::Rain => (72, 140, 216),
             };
-            for (i, (scale, a_mul)) in [(1.36, 0.32), (1.20, 0.55)].iter().enumerate() {
-                let a = (base_a * a_mul * pulse * (1.0 - i as f32 * 0.12)) as u8;
-                p.circle_filled(
-                    center,
-                    ball_r() * scale,
-                    Color32::from_rgba_unmultiplied(cr, cg, cb, a),
-                );
-            }
+            p.circle_filled(
+                center,
+                ball_r() * 1.16,
+                Color32::from_rgba_unmultiplied(cr, cg, cb, (44.0 * pulse) as u8),
+            );
+            p.circle_stroke(
+                center,
+                ball_r() * 1.06,
+                Stroke::new(
+                    2.2 * s,
+                    Color32::from_rgba_unmultiplied(16, 28, 48, (72.0 * pulse) as u8),
+                ),
+            );
+            p.circle_stroke(
+                center,
+                ball_r() * 1.06,
+                Stroke::new(
+                    1.4 * s,
+                    Color32::from_rgba_unmultiplied(cr, cg, cb, (150.0 * pulse) as u8),
+                ),
+            );
         }
     }
 
@@ -4529,6 +4597,8 @@ fn paint_orb(
     let night_clear = !is_day && matches!(scene.orb_kind(), OrbKind::Sunny);
     if night_clear {
         paint_night_sky(ui, center, fx_alpha);
+    } else {
+        paint_orb_sky(ui, center, scene, is_day);
     }
     paint_water(ui, center, t, scene, is_day, temp);
 
@@ -4653,6 +4723,14 @@ fn tint_water_for_temp(base: Color32, scene: Scene, is_day: bool, temp: Option<f
     mix_rgb(base, target, bias.abs() * strength)
 }
 
+fn paint_orb_sky(ui: &mut egui::Ui, center: Pos2, scene: Scene, is_day: bool) {
+    ui.painter().circle_filled(
+        center,
+        ball_r() - 1.4 * ball_s(),
+        scene.sky(is_day),
+    );
+}
+
 fn paint_water(
     ui: &mut egui::Ui,
     center: Pos2,
@@ -4664,8 +4742,8 @@ fn paint_water(
     let p = ui.painter();
     let back = water_polygon(center, t / 11.0 * TAU, 0.58);
     let front = water_polygon(center, -t / 8.0 * TAU + 0.8, 0.62);
-    let back_a = if is_day { 190 } else { 215 };
-    let front_a = if is_day { 210 } else { 230 };
+    let back_a = if is_day { 228 } else { 230 };
+    let front_a = if is_day { 240 } else { 242 };
     if back.len() >= 3 {
         let c = tint_water_for_temp(scene.water_a(is_day), scene, is_day, temp);
         p.add(Shape::convex_polygon(
@@ -5096,55 +5174,10 @@ fn build_tray_menu(
 
 fn make_tray_icon() -> Result<tray_icon::Icon, Box<dyn std::error::Error>> {
     use tray_icon::Icon;
-    // 32×32 with coverage AA — reads cleanly when Windows scales to 16px.
     const N: u32 = 32;
-    let mut rgba = vec![0u8; (N * N * 4) as usize];
-    let cx = (N as f32) * 0.5;
-    let cy = cx;
-    let r = N as f32 * 0.46;
-    for y in 0..N {
-        for x in 0..N {
-            let dx = (x as f32 + 0.5 - cx) / r;
-            let dy = (y as f32 + 0.5 - cy) / r;
-            let d = (dx * dx + dy * dy).sqrt();
-            let alpha = smoothstep(1.06, 0.94, d);
-            if alpha <= 0.01 {
-                continue;
-            }
-            let nz = (1.0 - (dx * dx + dy * dy).min(1.0)).sqrt();
-            let lit = (0.42 + 0.58 * (-dx * 0.32 - dy * 0.55 + nz * 0.62)).clamp(0.15, 1.0);
-            let gy = (dy * 0.5 + 0.5).clamp(0.0, 1.0);
-            let mut cr = lerp(0x48 as f32, 0x1e as f32, gy) * lit;
-            let mut cg = lerp(0xce as f32, 0x8a as f32, gy) * lit;
-            let mut cb = lerp(0xc4 as f32, 0x86 as f32, gy) * lit;
-
-            let sdx = dx - 0.16;
-            let sdy = dy + 0.24;
-            let sun = smoothstep(0.40, 0.18, (sdx * sdx + sdy * sdy).sqrt());
-            cr = lerp(cr, 255.0, sun * 0.92);
-            cg = lerp(cg, 188.0, sun * 0.90);
-            cb = lerp(cb, 72.0, sun * 0.82);
-
-            let hdx = dx + 0.34;
-            let hdy = dy + 0.42;
-            let spec = smoothstep(0.30, 0.02, (hdx * hdx + hdy * hdy).sqrt());
-            cr = (cr + 255.0 * spec * 0.62).min(255.0);
-            cg = (cg + 255.0 * spec * 0.62).min(255.0);
-            cb = (cb + 255.0 * spec * 0.62).min(255.0);
-
-            let rim = smoothstep(0.80, 1.02, d) * 0.45;
-            cr = (cr + 210.0 * rim).min(255.0);
-            cg = (cg + 230.0 * rim).min(255.0);
-            cb = (cb + 235.0 * rim).min(255.0);
-
-            let i = ((y * N + x) * 4) as usize;
-            rgba[i] = cr.round() as u8;
-            rgba[i + 1] = cg.round() as u8;
-            rgba[i + 2] = cb.round() as u8;
-            rgba[i + 3] = (alpha * 255.0).round() as u8;
-        }
-    }
-    Ok(Icon::from_rgba(rgba, N, N)?)
+    let img = image::load_from_memory(include_bytes!("../assets/tray_icon.png"))?.to_rgba8();
+    let resized = image::imageops::resize(&img, N, N, image::imageops::FilterType::Lanczos3);
+    Ok(Icon::from_rgba(resized.into_raw(), N, N)?)
 }
 
 fn create_tray(
