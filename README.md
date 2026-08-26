@@ -28,7 +28,7 @@
 
 ### 下载运行
 
-不解源码可直接下载 [**v0.3.0** 压缩包](https://github.com/robennn/WeatherBall/raw/main/release/weatherball-native-windows-v0.3.0.zip)，解压后双击 `weatherball-native.exe`。
+不解源码可直接下载 [**v0.3.1** 压缩包](https://github.com/robennn/WeatherBall/raw/main/release/weatherball-native-windows-v0.3.1.zip)，解压后双击 `weatherball-native.exe`。
 
 ### 自行编译
 

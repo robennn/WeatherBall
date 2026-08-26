@@ -4,6 +4,20 @@
 // Release: GUI-only process — no extra console window beside the orb.
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
+// Hybrid laptops: do not request the NVIDIA dGPU. DWM composites on the iGPU;
+// OpenGL on NVIDIA drops per-pixel alpha and shows an opaque gray box.
+#[cfg(target_os = "windows")]
+#[used]
+#[no_mangle]
+#[allow(non_upper_case_globals)]
+pub static NvOptimusEnablement: u32 = 0;
+
+#[cfg(target_os = "windows")]
+#[used]
+#[no_mangle]
+#[allow(non_upper_case_globals)]
+pub static AmdPowerXpressRequestHighPerformance: i32 = 0;
+
 mod cities;
 mod display;
 mod settings;
@@ -14,6 +28,8 @@ use eframe::egui::{
     Vec2,
 };
 use std::f32::consts::{PI, TAU};
+use std::io::Read;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
@@ -370,6 +386,7 @@ struct OrbApp {
     suppress_click: bool,
     /// CJK font bytes loaded off-thread: (bytes, ttc_index).
     pending_font: Arc<Mutex<Option<(Vec<u8>, u32)>>>,
+    font_job_done: Arc<AtomicBool>,
     fonts_applied: bool,
     frames: u64,
     /// Shared with tray menu handler (Win32 show/hide).
@@ -381,6 +398,8 @@ struct OrbApp {
     pos_applied: bool,
     last_passthrough: Option<bool>,
     taskbar_hidden: bool,
+    /// NVIDIA dGPU: DWM per-pixel alpha applied once (Intel already works).
+    nvidia_alpha_applied: bool,
     fullscreen_occluded: Arc<AtomicBool>,
     tray: Option<TrayUi>,
     city_picker: CityPicker,
@@ -570,6 +589,11 @@ fn main() -> eframe::Result<()> {
         viewport,
         centered: false,
         persist_window: false,
+        renderer: eframe::Renderer::Glow,
+        // MSAA + per-pixel alpha is broken on some GPUs (opaque gray box around the orb).
+        multisampling: 0,
+        depth_buffer: 0,
+        stencil_buffer: 0,
         ..Default::default()
     };
 
@@ -578,9 +602,15 @@ fn main() -> eframe::Result<()> {
         "WeatherBall",
         native_options,
         Box::new(move |cc| {
-            // Do NOT load CJK fonts here — reading msyh.ttc blocks the first frame for seconds.
+            // Dark widgets, but never fill the whole hwnd — leftover panel_fill shows as a
+            // gray rectangle around the orb when DWM transparency fails.
             cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
-            cc.egui_ctx.set_visuals(egui::Visuals::dark());
+            let mut visuals = egui::Visuals::dark();
+            visuals.panel_fill = Color32::TRANSPARENT;
+            visuals.window_fill = Color32::TRANSPARENT;
+            visuals.extreme_bg_color = Color32::TRANSPARENT;
+            visuals.faint_bg_color = Color32::TRANSPARENT;
+            cc.egui_ctx.set_visuals(visuals);
             let scene = Scene::Sunny;
             let day_night = loaded.day_night;
             let api_is_day = local_is_day_guess();
@@ -589,11 +619,13 @@ fn main() -> eframe::Result<()> {
             spawn_weather_fetch(Arc::clone(&weather));
 
             let pending_font = Arc::new(Mutex::new(None));
+            let font_job_done = Arc::new(AtomicBool::new(false));
             let pending_font_bg = Arc::clone(&pending_font);
+            let font_job_done_bg = Arc::clone(&font_job_done);
             thread::spawn(move || {
-                if let Some(font) = load_cjk_font_bytes() {
-                    *lock_mutex(&pending_font_bg) = Some(font);
-                }
+                let found = ensure_cjk_font();
+                *lock_mutex(&pending_font_bg) = found;
+                font_job_done_bg.store(true, Ordering::Relaxed);
             });
 
             let window_visible = Arc::new(AtomicBool::new(true));
@@ -662,6 +694,7 @@ fn main() -> eframe::Result<()> {
                 drag_grab: None,
                 suppress_click: false,
                 pending_font,
+                font_job_done,
                 fonts_applied: false,
                 frames: 0,
                 window_visible,
@@ -672,6 +705,7 @@ fn main() -> eframe::Result<()> {
                 pos_applied: false,
                 last_passthrough: None,
                 taskbar_hidden: false,
+                nvidia_alpha_applied: false,
                 fullscreen_occluded,
                 tray: None,
                 city_picker: CityPicker::new(),
@@ -691,10 +725,59 @@ fn face_has_distinct_cjk(bytes: &[u8], index: u32) -> bool {
     let a = font.glyph_id('晴');
     let b = font.glyph_id('天');
     let c = font.glyph_id('气');
-    a.0 != 0 && b.0 != 0 && c.0 != 0 && a != b && b != c
+    let n = font.glyph_id('N');
+    a.0 != 0
+        && b.0 != 0
+        && c.0 != 0
+        && a != b
+        && b != c
+        && a != n
+        && b != n
 }
 
-fn load_cjk_font_bytes() -> Option<(Vec<u8>, u32)> {
+const CJK_CACHE_NAME: &str = "NotoSansSC-Regular.otf";
+
+fn cached_cjk_font_path() -> Option<PathBuf> {
+    Some(settings::fonts_dir()?.join(CJK_CACHE_NAME))
+}
+
+fn sidecar_cjk_font_paths() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            out.push(dir.join(CJK_CACHE_NAME));
+            out.push(dir.join("fonts").join(CJK_CACHE_NAME));
+            out.push(dir.join("NotoSansSC-Regular.ttf"));
+        }
+    }
+    out
+}
+
+fn try_font_file(path: &std::path::Path) -> Option<(Vec<u8>, u32)> {
+    let bytes = std::fs::read(path).ok()?;
+    if face_has_distinct_cjk(&bytes, 0) {
+        eprintln!(
+            "[weatherball-native] loaded font {} ({} KB)",
+            path.display(),
+            bytes.len() / 1024
+        );
+        return Some((bytes, 0));
+    }
+    for index in 1..4u32 {
+        if face_has_distinct_cjk(&bytes, index) {
+            eprintln!(
+                "[weatherball-native] loaded font {}#{} ({} KB)",
+                path.display(),
+                index,
+                bytes.len() / 1024
+            );
+            return Some((bytes, index));
+        }
+    }
+    None
+}
+
+fn load_system_cjk_ttf() -> Option<(Vec<u8>, u32)> {
     let ttf = [
         r"C:\Windows\Fonts\simhei.ttf",
         r"C:\Windows\Fonts\DengXian.ttf",
@@ -708,6 +791,15 @@ fn load_cjk_font_bytes() -> Option<(Vec<u8>, u32)> {
         r"C:\Windows\Fonts\msgothic.ttf",
         r"C:\Windows\Fonts\YuGothR.ttf",
     ];
+    for path in ttf {
+        if let Some(font) = try_font_file(std::path::Path::new(path)) {
+            return Some(font);
+        }
+    }
+    None
+}
+
+fn load_system_cjk_ttc() -> Option<(Vec<u8>, u32)> {
     let ttc = [
         r"C:\Windows\Fonts\msyh.ttc",
         r"C:\Windows\Fonts\msjh.ttc",
@@ -715,38 +807,122 @@ fn load_cjk_font_bytes() -> Option<(Vec<u8>, u32)> {
         r"C:\Windows\Fonts\YuGothR.ttc",
         r"C:\Windows\Fonts\malgun.ttc",
     ];
-
-    for path in ttf {
-        let Ok(bytes) = std::fs::read(path) else {
-            continue;
-        };
-        if face_has_distinct_cjk(&bytes, 0) {
-            eprintln!(
-                "[weatherball-native] loaded font {} ({} KB)",
-                path,
-                bytes.len() / 1024
-            );
-            return Some((bytes, 0));
+    for path in ttc {
+        if let Some(font) = try_font_file(std::path::Path::new(path)) {
+            return Some(font);
         }
     }
+    None
+}
 
-    for path in ttc {
-        let Ok(bytes) = std::fs::read(path) else {
+fn download_cjk_font() -> Option<Vec<u8>> {
+    const URLS: &[&str] = &[
+        "https://cdn.jsdelivr.net/gh/notofonts/noto-cjk@main/Sans/SubsetOTF/SC/NotoSansSC-Regular.otf",
+        "https://github.com/notofonts/noto-cjk/raw/main/Sans/SubsetOTF/SC/NotoSansSC-Regular.otf",
+    ];
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(10))
+        .timeout_read(Duration::from_secs(120))
+        .build();
+    for url in URLS {
+        eprintln!("[weatherball-native] downloading CJK font from {url}");
+        let Ok(resp) = agent
+            .get(url)
+            .set("User-Agent", "WeatherBall/0.3")
+            .call()
+        else {
             continue;
         };
-        for index in 0..4u32 {
-            if face_has_distinct_cjk(&bytes, index) {
-                eprintln!(
-                    "[weatherball-native] loaded font {}#{} ({} KB)",
-                    path,
-                    index,
-                    bytes.len() / 1024
-                );
-                return Some((bytes, index));
+        let mut buf = Vec::new();
+        let read = resp
+            .into_reader()
+            .take(24 * 1024 * 1024)
+            .read_to_end(&mut buf);
+        if read.is_ok() && buf.len() > 80_000 && face_has_distinct_cjk(&buf, 0) {
+            eprintln!(
+                "[weatherball-native] downloaded CJK font ({} KB)",
+                buf.len() / 1024
+            );
+            return Some(buf);
+        }
+    }
+    eprintln!("[weatherball-native] CJK font download failed");
+    None
+}
+
+fn save_cached_cjk_font(bytes: &[u8]) {
+    let Some(path) = cached_cjk_font_path() else {
+        return;
+    };
+    if std::fs::write(&path, bytes).is_ok() {
+        eprintln!(
+            "[weatherball-native] installed font cache {}",
+            path.display()
+        );
+        install_user_font(&path);
+    }
+}
+
+/// Register the font for this user so it is available on later launches.
+fn install_user_font(path: &std::path::Path) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        const FR_PRIVATE: u32 = 0x10;
+        extern "system" {
+            fn AddFontResourceExW(
+                name: *const u16,
+                flags: u32,
+                reserved: *mut std::ffi::c_void,
+            ) -> i32;
+        }
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+        unsafe {
+            AddFontResourceExW(wide.as_ptr(), FR_PRIVATE, std::ptr::null_mut());
+        }
+        if let (Some(local), Some(name)) = (std::env::var_os("LOCALAPPDATA"), path.file_name()) {
+            let dest = PathBuf::from(local)
+                .join("Microsoft")
+                .join("Windows")
+                .join("Fonts")
+                .join(name);
+            if dest != path {
+                if let Some(parent) = dest.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::copy(path, dest);
             }
         }
     }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+    }
+}
 
+/// System TTF first, then a cached/downloaded Noto SC face. TTC is last because
+/// a bad collection face can rasterize the style name "Normal".
+fn ensure_cjk_font() -> Option<(Vec<u8>, u32)> {
+    if let Some(font) = load_system_cjk_ttf() {
+        return Some(font);
+    }
+    for path in sidecar_cjk_font_paths() {
+        if let Some(font) = try_font_file(&path) {
+            return Some(font);
+        }
+    }
+    if let Some(path) = cached_cjk_font_path() {
+        if let Some(font) = try_font_file(&path) {
+            return Some(font);
+        }
+    }
+    if let Some(bytes) = download_cjk_font() {
+        save_cached_cjk_font(&bytes);
+        return Some((bytes, 0));
+    }
+    if let Some(font) = load_system_cjk_ttc() {
+        return Some(font);
+    }
     eprintln!("[weatherball-native] 未找到可用中文字体");
     None
 }
@@ -874,14 +1050,31 @@ impl eframe::App for OrbApp {
             }
         }
 
+        // NVIDIA: OpenGL alpha often never reaches DWM (DXGI layered present → gray box).
+        // Intel already composites correctly — do not touch those machines (glass frame).
+        #[cfg(target_os = "windows")]
+        if !self.nvidia_alpha_applied {
+            match gl_vendor_is_nvidia(frame) {
+                None => {}
+                Some(false) => self.nvidia_alpha_applied = true,
+                Some(true) => {
+                    let hwnd = self.main_hwnd.load(Ordering::Relaxed);
+                    if hwnd != 0 {
+                        enable_nvidia_per_pixel_alpha(hwnd);
+                        self.nvidia_alpha_applied = true;
+                    }
+                }
+            }
+        }
+
         // Apply CJK font after the orb has already painted at least once.
         if !self.fonts_applied && self.frames >= 2 {
-            let ready = lock_mutex(&self.pending_font).take();
-            if let Some((bytes, index)) = ready {
-                apply_cjk_font(ctx, bytes, index);
+            if self.font_job_done.load(Ordering::Relaxed) {
+                if let Some((bytes, index)) = lock_mutex(&self.pending_font).take() {
+                    apply_cjk_font(ctx, bytes, index);
+                }
                 self.fonts_applied = true;
             } else {
-                // Keep polling until background loader finishes.
                 ctx.request_repaint_after(Duration::from_millis(50));
             }
         }
@@ -5151,6 +5344,103 @@ fn hide_hwnd_from_taskbar(hwnd_val: isize) -> bool {
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
         );
         true
+    }
+}
+
+/// True when the GL context is actually running on NVIDIA (not merely installed).
+#[cfg(target_os = "windows")]
+fn gl_vendor_is_nvidia(frame: &eframe::Frame) -> Option<bool> {
+    use glow::HasContext;
+    let gl = frame.gl()?;
+    let vendor = unsafe { gl.get_parameter_string(glow::VENDOR) };
+    Some(vendor.to_ascii_uppercase().contains("NVIDIA"))
+}
+
+/// NVIDIA's default "layered on DXGI swapchain" present strips framebuffer alpha,
+/// so the 160×520 hwnd is an opaque gray rectangle around the orb.
+///
+/// Fix used by SDL/snowglobe: WS_EX_LAYERED + DwmExtendFrameIntoClientArea(-1).
+/// Do **not** call DwmEnableBlurBehindWindow — that paints a glass rectangle on
+/// machines where GL alpha already works (Intel).
+#[cfg(target_os = "windows")]
+fn enable_nvidia_per_pixel_alpha(hwnd_val: isize) {
+    use std::ffi::c_void;
+
+    if hwnd_val == 0 {
+        return;
+    }
+
+    type Hwnd = *mut c_void;
+    const GWL_EXSTYLE: i32 = -20;
+    const WS_EX_LAYERED: isize = 0x0008_0000;
+    const LWA_ALPHA: u32 = 0x02;
+    const SWP_NOSIZE: u32 = 0x0001;
+    const SWP_NOMOVE: u32 = 0x0002;
+    const SWP_NOZORDER: u32 = 0x0004;
+    const SWP_NOACTIVATE: u32 = 0x0010;
+    const SWP_FRAMECHANGED: u32 = 0x0020;
+
+    #[repr(C)]
+    struct Margins {
+        cx_left_width: i32,
+        cx_right_width: i32,
+        cy_top_height: i32,
+        cy_bottom_height: i32,
+    }
+
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmExtendFrameIntoClientArea(h_wnd: Hwnd, p_mar_inset: *const Margins) -> i32;
+    }
+    extern "system" {
+        fn IsWindow(h_wnd: Hwnd) -> i32;
+        fn GetWindowLongPtrW(h_wnd: Hwnd, n_index: i32) -> isize;
+        fn SetWindowLongPtrW(h_wnd: Hwnd, n_index: i32, dw_new_long: isize) -> isize;
+        fn SetLayeredWindowAttributes(
+            h_wnd: Hwnd,
+            cr_key: u32,
+            b_alpha: u8,
+            dw_flags: u32,
+        ) -> i32;
+        fn SetWindowPos(
+            h_wnd: Hwnd,
+            insert_after: Hwnd,
+            x: i32,
+            y: i32,
+            cx: i32,
+            cy: i32,
+            flags: u32,
+        ) -> i32;
+    }
+
+    let hwnd = hwnd_val as Hwnd;
+    unsafe {
+        if IsWindow(hwnd) == 0 {
+            return;
+        }
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        if ex & WS_EX_LAYERED == 0 {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED);
+        }
+        // Negative margins = sheet of glass: DWM honors GL framebuffer alpha.
+        let margins = Margins {
+            cx_left_width: -1,
+            cx_right_width: -1,
+            cy_top_height: -1,
+            cy_bottom_height: -1,
+        };
+        DwmExtendFrameIntoClientArea(hwnd, &margins);
+        // Activate layered composition without reducing window-level opacity.
+        SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
     }
 }
 

@@ -246,8 +246,20 @@ pub fn clear_manual_city() {
 }
 
 fn settings_path() -> Option<PathBuf> {
+    Some(app_dir()?.join("settings.json"))
+}
+
+pub fn app_dir() -> Option<PathBuf> {
     let appdata = std::env::var_os("APPDATA")?;
-    Some(PathBuf::from(appdata).join("WeatherBall").join("settings.json"))
+    let dir = PathBuf::from(appdata).join("WeatherBall");
+    let _ = std::fs::create_dir_all(&dir);
+    Some(dir)
+}
+
+pub fn fonts_dir() -> Option<PathBuf> {
+    let dir = app_dir()?.join("fonts");
+    let _ = std::fs::create_dir_all(&dir);
+    Some(dir)
 }
 
 pub fn is_open_at_login() -> bool {

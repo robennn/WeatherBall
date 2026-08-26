@@ -2927,11 +2927,12 @@ dependencies = [
 
 [[package]]
 name = "weatherball-native"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "ab_glyph",
  "eframe",
  "egui",
+ "glow",
  "image",
  "raw-window-handle",
  "serde",
