@@ -417,6 +417,8 @@ struct OrbApp {
     debug_t: f32,
     lock_position: bool,
     lock_t: f32,
+    fix_gray_box: bool,
+    fix_gray_box_t: f32,
     ball_scale: f32,
     ball_opacity: f32,
     panel_skin: String,
@@ -442,8 +444,8 @@ struct OrbApp {
     pos_applied: bool,
     last_passthrough: Option<bool>,
     taskbar_hidden: bool,
-    /// NVIDIA dGPU: DWM per-pixel alpha applied once (Intel already works).
-    nvidia_alpha_applied: bool,
+    /// True while the NVIDIA DWM layered-alpha hwnd styles are currently on.
+    nvidia_hwnd_fix_on: bool,
     fullscreen_occluded: Arc<AtomicBool>,
     tray: Option<TrayUi>,
     city_picker: CityPicker,
@@ -621,9 +623,14 @@ fn main() -> eframe::Result<()> {
         .with_always_on_top()
         .with_resizable(false)
         .with_taskbar(false)
+        .with_close_button(false)
+        .with_minimize_button(false)
+        .with_maximize_button(false)
         .with_mouse_passthrough(false)
         .with_visible(true)
-        .with_title("WeatherBall");
+        // Never use an empty title: some NVIDIA DWM paths substitute the
+        // caption-font subfamily "Normal". NBSP is invisible if chrome leaks.
+        .with_title(SILENT_WINDOW_TITLE);
     if let Some((x, y)) = saved_pos {
         let [lx, ly] = display::physical_to_logical_pos(x, y);
         viewport = viewport.with_position([lx, ly]);
@@ -715,6 +722,8 @@ fn main() -> eframe::Result<()> {
                 debug_t: if loaded.debug_mode { 1.0 } else { 0.0 },
                 lock_position: loaded.lock_position,
                 lock_t: if loaded.lock_position { 1.0 } else { 0.0 },
+                fix_gray_box: loaded.fix_gray_box,
+                fix_gray_box_t: if loaded.fix_gray_box { 1.0 } else { 0.0 },
                 ball_scale: settings::clamp_ball_scale(loaded.ball_scale),
                 ball_opacity: settings::clamp_ball_opacity(loaded.ball_opacity),
                 panel_skin: {
@@ -749,7 +758,7 @@ fn main() -> eframe::Result<()> {
                 pos_applied: false,
                 last_passthrough: None,
                 taskbar_hidden: false,
-                nvidia_alpha_applied: false,
+                nvidia_hwnd_fix_on: false,
                 fullscreen_occluded,
                 tray: None,
                 city_picker: CityPicker::new(),
@@ -759,24 +768,62 @@ fn main() -> eframe::Result<()> {
     )
 }
 
+/// Invisible hwnd title. Empty titles make some DWM paths paint "Normal".
+const SILENT_WINDOW_TITLE: &str = "\u{00A0}";
+
 /// Reject faces that cannot actually draw CJK. A broken TTC face often maps
 /// every character to one glyph and rasterizes the style name "Normal".
 fn face_has_distinct_cjk(bytes: &[u8], index: u32) -> bool {
-    use ab_glyph::{Font, FontRef};
+    use ab_glyph::{Font, FontRef, ScaleFont};
     let Ok(font) = FontRef::try_from_slice_and_index(bytes, index) else {
         return false;
     };
-    let a = font.glyph_id('晴');
-    let b = font.glyph_id('天');
-    let c = font.glyph_id('气');
-    let n = font.glyph_id('N');
-    a.0 != 0
-        && b.0 != 0
-        && c.0 != 0
-        && a != b
-        && b != c
-        && a != n
-        && b != n
+    let cjk = ['晴', '天', '气', '设', '湿'];
+    let mut ids = [ab_glyph::GlyphId(0); 5];
+    for (i, ch) in cjk.iter().copied().enumerate() {
+        let id = font.glyph_id(ch);
+        if id.0 == 0 {
+            return false;
+        }
+        ids[i] = id;
+    }
+    for i in 0..ids.len() {
+        for j in (i + 1)..ids.len() {
+            if ids[i] == ids[j] {
+                return false;
+            }
+        }
+    }
+    for ch in ['N', 'o', 'r', 'm', 'a', 'l'] {
+        let latin = font.glyph_id(ch);
+        if ids.iter().any(|&id| id == latin) {
+            return false;
+        }
+    }
+    let scaled = font.as_scaled(32.0);
+    for ch in cjk {
+        let gid = font.glyph_id(ch);
+        let adv = scaled.h_advance(gid);
+        // A face that bakes the word "Normal" into the CJK slot is far wider
+        // than a square ideograph.
+        if !(8.0..=48.0).contains(&adv) {
+            return false;
+        }
+        let Some(outlined) = font.outline_glyph(gid.with_scale(32.0)) else {
+            return false;
+        };
+        let bounds = outlined.px_bounds();
+        let w = bounds.width();
+        let h = bounds.height();
+        if w < 3.0 || h < 3.0 {
+            return false;
+        }
+        let aspect = w / h.max(0.1);
+        if aspect < 0.4 || aspect > 1.7 {
+            return false;
+        }
+    }
+    true
 }
 
 const CJK_CACHE_NAME: &str = "NotoSansSC-Regular.otf";
@@ -799,22 +846,22 @@ fn sidecar_cjk_font_paths() -> Vec<PathBuf> {
 
 fn try_font_file(path: &std::path::Path) -> Option<(Vec<u8>, u32)> {
     let bytes = std::fs::read(path).ok()?;
-    if face_has_distinct_cjk(&bytes, 0) {
-        eprintln!(
-            "[weatherball-native] loaded font {} ({} KB)",
-            path.display(),
-            bytes.len() / 1024
-        );
-        return Some((bytes, 0));
-    }
-    for index in 1..4u32 {
+    for index in 0..16u32 {
         if face_has_distinct_cjk(&bytes, index) {
-            eprintln!(
-                "[weatherball-native] loaded font {}#{} ({} KB)",
-                path.display(),
-                index,
-                bytes.len() / 1024
-            );
+            if index == 0 {
+                eprintln!(
+                    "[weatherball-native] loaded font {} ({} KB)",
+                    path.display(),
+                    bytes.len() / 1024
+                );
+            } else {
+                eprintln!(
+                    "[weatherball-native] loaded font {}#{} ({} KB)",
+                    path.display(),
+                    index,
+                    bytes.len() / 1024
+                );
+            }
             return Some((bytes, index));
         }
     }
@@ -978,10 +1025,12 @@ fn apply_cjk_font(ctx: &egui::Context, bytes: Vec<u8>, index: u32) {
     fonts.font_data.insert("cjk".to_owned(), Arc::new(data));
 
     // Keep Ubuntu-Light first so Latin is never stolen by a bad CJK face.
-    // CJK glyphs fall through to this face.
+    // CJK glyphs fall through to this face; never insert at index 0.
     if let Some(prop) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-        let idx = 1.min(prop.len());
-        prop.insert(idx, "cjk".to_owned());
+        prop.retain(|name| name != "cjk");
+        if !prop.is_empty() {
+            prop.insert(1.min(prop.len()), "cjk".to_owned());
+        }
     }
     if let Some(mono) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
         mono.push("cjk".to_owned());
@@ -1001,6 +1050,10 @@ impl eframe::App for OrbApp {
         }
 
         set_paint_ball_r(ORB_R * self.ball_scale);
+
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(
+            SILENT_WINDOW_TITLE.to_owned(),
+        ));
 
         if let Some(hwnd) = hwnd_from_frame(frame) {
             self.main_hwnd.store(hwnd, Ordering::Relaxed);
@@ -1070,6 +1123,38 @@ impl eframe::App for OrbApp {
             }
         }
 
+        // NVIDIA DWM "sheet of glass" fixes the gray box on some dGPUs, but paints
+        // a glass rectangle on others where GL alpha already worked (v0.3.0).
+        // Opt-in via 设置 → 修复灰框. Apply before caption suppress so the
+        // FRAMECHANGED from extend cannot leave WS_CAPTION on for this present.
+        #[cfg(target_os = "windows")]
+        if let Some(is_nv) = gl_vendor_is_nvidia(frame) {
+            let want = is_nv && self.fix_gray_box;
+            let hwnd = self.main_hwnd.load(Ordering::Relaxed);
+            if hwnd != 0 {
+                if want && !self.nvidia_hwnd_fix_on {
+                    enable_nvidia_per_pixel_alpha(hwnd);
+                    self.nvidia_hwnd_fix_on = true;
+                } else if !want && self.nvidia_hwnd_fix_on {
+                    disable_nvidia_per_pixel_alpha(hwnd);
+                    self.nvidia_hwnd_fix_on = false;
+                }
+            }
+        }
+
+        // winit keeps WS_CAPTION for aero snap and restores it after DPI/style
+        // refreshes. On some NVIDIA DWM setups that paints the window title in the
+        // client area (often the font subfamily "Normal") at the top of the hwnd.
+        // Run even while hidden so the first ShowWindow cannot flash the caption.
+        #[cfg(target_os = "windows")]
+        {
+            let hwnd = self.main_hwnd.load(Ordering::Relaxed);
+            if hwnd != 0 {
+                hide_hwnd_from_taskbar(hwnd);
+                self.taskbar_hidden = true;
+            }
+        }
+
         let visible = self.window_visible.load(Ordering::Relaxed);
 
         // User hid the orb — skip painting; tray show will request_repaint.
@@ -1082,33 +1167,6 @@ impl eframe::App for OrbApp {
         if self.fullscreen_occluded.load(Ordering::Relaxed) {
             ctx.request_repaint_after(Duration::from_millis(200));
             return;
-        }
-
-        // Only touch OUR hwnd — EnumWindows waits on every top-level window and can freeze
-        // the orb if Explorer or another app is busy.
-        #[cfg(target_os = "windows")]
-        if !self.taskbar_hidden {
-            let hwnd = self.main_hwnd.load(Ordering::Relaxed);
-            if hwnd != 0 && hide_hwnd_from_taskbar(hwnd) {
-                self.taskbar_hidden = true;
-            }
-        }
-
-        // NVIDIA: OpenGL alpha often never reaches DWM (DXGI layered present → gray box).
-        // Intel already composites correctly — do not touch those machines (glass frame).
-        #[cfg(target_os = "windows")]
-        if !self.nvidia_alpha_applied {
-            match gl_vendor_is_nvidia(frame) {
-                None => {}
-                Some(false) => self.nvidia_alpha_applied = true,
-                Some(true) => {
-                    let hwnd = self.main_hwnd.load(Ordering::Relaxed);
-                    if hwnd != 0 {
-                        enable_nvidia_per_pixel_alpha(hwnd);
-                        self.nvidia_alpha_applied = true;
-                    }
-                }
-            }
         }
 
         // Apply CJK font after the orb has already painted at least once.
@@ -1225,6 +1283,8 @@ impl eframe::App for OrbApp {
         tick_toward(&mut self.debug_t, debug_want, dt, 0.16);
         let lock_want = if self.lock_position { 1.0 } else { 0.0 };
         tick_toward(&mut self.lock_t, lock_want, dt, 0.16);
+        let gray_want = if self.fix_gray_box { 1.0 } else { 0.0 };
+        tick_toward(&mut self.fix_gray_box_t, gray_want, dt, 0.16);
 
         let height_ease = ease_in_out_cubic(self.detail_t);
         // Opacity finishes sooner so the panel is gone before it would feel clipped.
@@ -1238,7 +1298,8 @@ impl eframe::App for OrbApp {
             || self.city_picker.open
             || (self.autostart_t - autostart_want).abs() > 0.002
             || (self.debug_t - debug_want).abs() > 0.002
-            || (self.lock_t - lock_want).abs() > 0.002;
+            || (self.lock_t - lock_want).abs() > 0.002
+            || (self.fix_gray_box_t - gray_want).abs() > 0.002;
 
         let mut pointer_busy = false;
 
@@ -1262,6 +1323,7 @@ impl eframe::App for OrbApp {
                 let mut toggle_autostart = false;
                 let mut toggle_debug = false;
                 let mut toggle_lock = false;
+                let mut toggle_gray_box = false;
                 let mut new_ball_scale: Option<f32> = None;
                 let mut new_ball_opacity: Option<f32> = None;
                 let mut open_skins = false;
@@ -1301,6 +1363,7 @@ impl eframe::App for OrbApp {
                                     self.autostart_t,
                                     self.debug_t,
                                     self.lock_t,
+                                    self.fix_gray_box_t,
                                     self.ball_scale,
                                     self.ball_opacity,
                                     &mut self.settings_scroll,
@@ -1312,6 +1375,7 @@ impl eframe::App for OrbApp {
                                 toggle_autostart = actions.toggle_autostart;
                                 toggle_debug = actions.toggle_debug;
                                 toggle_lock = actions.toggle_lock;
+                                toggle_gray_box = actions.toggle_gray_box;
                                 new_ball_scale = actions.ball_scale;
                                 new_ball_opacity = actions.ball_opacity;
                                 open_skins = actions.open_skins;
@@ -1403,6 +1467,11 @@ impl eframe::App for OrbApp {
                 if toggle_lock {
                     self.lock_position = !self.lock_position;
                     settings::save_lock_position(self.lock_position);
+                    ctx.request_repaint();
+                }
+                if toggle_gray_box {
+                    self.fix_gray_box = !self.fix_gray_box;
+                    settings::save_fix_gray_box(self.fix_gray_box);
                     ctx.request_repaint();
                 }
                 if let Some(v) = new_ball_scale {
@@ -3001,6 +3070,7 @@ struct SettingsActions {
     toggle_autostart: bool,
     toggle_debug: bool,
     toggle_lock: bool,
+    toggle_gray_box: bool,
     ball_scale: Option<f32>,
     ball_opacity: Option<f32>,
 }
@@ -3172,6 +3242,7 @@ fn paint_settings_panel(
     autostart_t: f32,
     debug_t: f32,
     lock_t: f32,
+    gray_box_t: f32,
     ball_scale: f32,
     ball_opacity: f32,
     scroll: &mut f32,
@@ -3185,6 +3256,7 @@ fn paint_settings_panel(
         toggle_autostart: false,
         toggle_debug: false,
         toggle_lock: false,
+        toggle_gray_box: false,
         ball_scale: None,
         ball_opacity: None,
     };
@@ -3195,7 +3267,7 @@ fn paint_settings_panel(
     const HEADER_H: f32 = 28.0;
     const SETTING_BLOCK: f32 = 56.0;
     const SLIDER_BLOCK: f32 = 54.0;
-    const CONTENT_H: f32 = SETTING_BLOCK * 3.0 + SLIDER_BLOCK * 2.0 + 6.0;
+    const CONTENT_H: f32 = SETTING_BLOCK * 4.0 + SLIDER_BLOCK * 2.0 + 6.0;
 
     let clip = ui.clip_rect().intersect(rect);
     let old_clip = ui.clip_rect();
@@ -3308,6 +3380,22 @@ fn paint_settings_panel(
     ) {
         if clicked {
             actions.toggle_lock = true;
+        }
+    }
+    if let Some(clicked) = paint_setting_row(
+        ui,
+        layout,
+        &mut cy,
+        body,
+        "修复灰框",
+        "独显出现不透明灰底时打开",
+        gray_box_t,
+        interactive,
+        opacity,
+        theme,
+    ) {
+        if clicked {
+            actions.toggle_gray_box = true;
         }
     }
     if let Some(v) = paint_slider_row(
@@ -5309,8 +5397,12 @@ fn win_run_message_loop() {
     }
 }
 
-/// Apply WS_EX_TOOLWINDOW to our hwnd only. EnumWindows can freeze the GUI
-/// thread if any other top-level window's thread is hung.
+/// Keep the hwnd borderless. winit's frameless path leaves WS_CAPTION set and
+/// uses WM_NCCALCSIZE to hide the non-client area; some NVIDIA DWM paths still
+/// paint the caption string in the client (often the font style name "Normal").
+///
+/// Empty titles are worse than "WeatherBall": DWM may substitute the caption
+/// font's subfamily ("Normal" / "常规"). Use an NBSP instead.
 #[cfg(target_os = "windows")]
 fn hide_hwnd_from_taskbar(hwnd_val: isize) -> bool {
     use std::ffi::c_void;
@@ -5322,21 +5414,74 @@ fn hide_hwnd_from_taskbar(hwnd_val: isize) -> bool {
     type Hwnd = *mut c_void;
     const GWL_EXSTYLE: i32 = -20;
     const GWL_STYLE: i32 = -16;
-    const WS_EX_APPWINDOW: isize = 0x0004_0000;
-    const WS_EX_TOOLWINDOW: isize = 0x0000_0080;
+    const WS_POPUP: isize = 0x8000_0000_u32 as isize;
     const WS_CAPTION: isize = 0x00C0_0000;
+    const WS_BORDER: isize = 0x0080_0000;
+    const WS_DLGFRAME: isize = 0x0040_0000;
     const WS_THICKFRAME: isize = 0x0004_0000;
     const WS_SYSMENU: isize = 0x0008_0000;
+    const WS_MINIMIZEBOX: isize = 0x0002_0000;
+    const WS_MAXIMIZEBOX: isize = 0x0001_0000;
+    const WS_EX_APPWINDOW: isize = 0x0004_0000;
+    const WS_EX_TOOLWINDOW: isize = 0x0000_0080;
+    const WS_EX_DLGMODALFRAME: isize = 0x0000_0001;
+    const WS_EX_WINDOWEDGE: isize = 0x0000_0100;
+    const WS_EX_CLIENTEDGE: isize = 0x0000_0200;
+    const WS_EX_STATICEDGE: isize = 0x0002_0000;
     const SWP_NOSIZE: u32 = 0x0001;
     const SWP_NOMOVE: u32 = 0x0002;
     const SWP_NOZORDER: u32 = 0x0004;
     const SWP_NOACTIVATE: u32 = 0x0010;
     const SWP_FRAMECHANGED: u32 = 0x0020;
+    const DWMWA_ALLOW_NCPAINT: u32 = 4;
+    const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+    const DWMWA_BORDER_COLOR: u32 = 34;
+    const DWMWA_CAPTION_COLOR: u32 = 35;
+    const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
+    /// Hide DWM caption/border (Win11). Do not use this for DWMWA_TEXT_COLOR —
+    /// that resets caption text to the system default instead of hiding it.
+    const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
+    const DWMWCP_DONOTROUND: u32 = 1;
+    const DWMSBT_NONE: u32 = 1;
+    const DWM_BB_ENABLE: u32 = 0x1;
+    const DWM_BB_BLURREGION: u32 = 0x2;
 
+    #[repr(C)]
+    struct DwmBlurBehind {
+        dw_flags: u32,
+        f_enable: i32,
+        h_rgn_blur: *mut c_void,
+        f_transition_on_maximized: i32,
+    }
+
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmSetWindowAttribute(
+            h_wnd: Hwnd,
+            attr: u32,
+            value: *const u32,
+            size: u32,
+        ) -> i32;
+        fn DwmEnableBlurBehindWindow(h_wnd: Hwnd, p_bb: *const DwmBlurBehind) -> i32;
+    }
+    #[link(name = "uxtheme")]
+    extern "system" {
+        fn SetWindowTheme(
+            h_wnd: Hwnd,
+            psz_sub_app_name: *const u16,
+            psz_sub_id_list: *const u16,
+        ) -> i32;
+    }
+    #[link(name = "gdi32")]
+    extern "system" {
+        fn CreateRectRgn(x1: i32, y1: i32, x2: i32, y2: i32) -> *mut c_void;
+        fn DeleteObject(h: *mut c_void) -> i32;
+    }
     extern "system" {
         fn IsWindow(h_wnd: Hwnd) -> i32;
         fn GetWindowLongPtrW(h_wnd: Hwnd, n_index: i32) -> isize;
         fn SetWindowLongPtrW(h_wnd: Hwnd, n_index: i32, dw_new_long: isize) -> isize;
+        fn GetWindowTextW(h_wnd: Hwnd, lp_string: *mut u16, n_max: i32) -> i32;
         fn SetWindowTextW(h_wnd: Hwnd, lp_string: *const u16) -> i32;
         fn SetWindowPos(
             h_wnd: Hwnd,
@@ -5354,28 +5499,76 @@ fn hide_hwnd_from_taskbar(hwnd_val: isize) -> bool {
         if IsWindow(hwnd) == 0 {
             return false;
         }
+        let caption_bits = WS_CAPTION
+            | WS_BORDER
+            | WS_DLGFRAME
+            | WS_THICKFRAME
+            | WS_SYSMENU
+            | WS_MINIMIZEBOX
+            | WS_MAXIMIZEBOX;
         let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
-        let next_style = style & !(WS_CAPTION | WS_THICKFRAME | WS_SYSMENU);
+        let next_style = (style | WS_POPUP) & !caption_bits;
+        let mut changed = false;
         if next_style != style {
             SetWindowLongPtrW(hwnd, GWL_STYLE, next_style);
+            changed = true;
         }
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        let next_ex = (ex | WS_EX_TOOLWINDOW) & !WS_EX_APPWINDOW;
+        let next_ex = (ex | WS_EX_TOOLWINDOW)
+            & !(WS_EX_APPWINDOW
+                | WS_EX_DLGMODALFRAME
+                | WS_EX_WINDOWEDGE
+                | WS_EX_CLIENTEDGE
+                | WS_EX_STATICEDGE);
         if next_ex != ex {
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next_ex);
+            changed = true;
         }
-        // ASCII title so a leaked caption cannot show CJK tofu or "Normal".
-        let title: Vec<u16> = "WeatherBall\0".encode_utf16().collect();
-        SetWindowTextW(hwnd, title.as_ptr());
-        SetWindowPos(
-            hwnd,
-            std::ptr::null_mut(),
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-        );
+        let mut buf = [0u16; 32];
+        let n = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+        let silent = n == 1 && buf[0] == 0x00A0;
+        if !silent {
+            let nbsp: [u16; 2] = [0x00A0, 0];
+            SetWindowTextW(hwnd, nbsp.as_ptr());
+            changed = true;
+        }
+
+        let none = DWMWA_COLOR_NONE;
+        let no_nc: u32 = 0;
+        let backdrop = DWMSBT_NONE;
+        let corner = DWMWCP_DONOTROUND;
+        DwmSetWindowAttribute(hwnd, DWMWA_ALLOW_NCPAINT, &no_nc, 4);
+        DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &none, 4);
+        DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &none, 4);
+        DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop, 4);
+        DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, 4);
+
+        if changed {
+            let empty: [u16; 1] = [0];
+            SetWindowTheme(hwnd, empty.as_ptr(), empty.as_ptr());
+            // Same empty-region blur winit uses for per-pixel alpha — not the
+            // full-window blur that paints a glass rectangle on Intel.
+            let region = CreateRectRgn(0, 0, -1, -1);
+            let bb = DwmBlurBehind {
+                dw_flags: DWM_BB_ENABLE | DWM_BB_BLURREGION,
+                f_enable: 1,
+                h_rgn_blur: region,
+                f_transition_on_maximized: 0,
+            };
+            DwmEnableBlurBehindWindow(hwnd, &bb);
+            if !region.is_null() {
+                DeleteObject(region);
+            }
+            SetWindowPos(
+                hwnd,
+                std::ptr::null_mut(),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+        }
         true
     }
 }
@@ -5465,6 +5658,78 @@ fn enable_nvidia_per_pixel_alpha(hwnd_val: isize) {
         DwmExtendFrameIntoClientArea(hwnd, &margins);
         // Activate layered composition without reducing window-level opacity.
         SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn disable_nvidia_per_pixel_alpha(hwnd_val: isize) {
+    use std::ffi::c_void;
+
+    if hwnd_val == 0 {
+        return;
+    }
+
+    type Hwnd = *mut c_void;
+    const GWL_EXSTYLE: i32 = -20;
+    const WS_EX_LAYERED: isize = 0x0008_0000;
+    const SWP_NOSIZE: u32 = 0x0001;
+    const SWP_NOMOVE: u32 = 0x0002;
+    const SWP_NOZORDER: u32 = 0x0004;
+    const SWP_NOACTIVATE: u32 = 0x0010;
+    const SWP_FRAMECHANGED: u32 = 0x0020;
+
+    #[repr(C)]
+    struct Margins {
+        cx_left_width: i32,
+        cx_right_width: i32,
+        cy_top_height: i32,
+        cy_bottom_height: i32,
+    }
+
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmExtendFrameIntoClientArea(h_wnd: Hwnd, p_mar_inset: *const Margins) -> i32;
+    }
+    extern "system" {
+        fn IsWindow(h_wnd: Hwnd) -> i32;
+        fn GetWindowLongPtrW(h_wnd: Hwnd, n_index: i32) -> isize;
+        fn SetWindowLongPtrW(h_wnd: Hwnd, n_index: i32, dw_new_long: isize) -> isize;
+        fn SetWindowPos(
+            h_wnd: Hwnd,
+            insert_after: Hwnd,
+            x: i32,
+            y: i32,
+            cx: i32,
+            cy: i32,
+            flags: u32,
+        ) -> i32;
+    }
+
+    let hwnd = hwnd_val as Hwnd;
+    unsafe {
+        if IsWindow(hwnd) == 0 {
+            return;
+        }
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        if ex & WS_EX_LAYERED != 0 {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex & !WS_EX_LAYERED);
+        }
+        let margins = Margins {
+            cx_left_width: 0,
+            cx_right_width: 0,
+            cy_top_height: 0,
+            cy_bottom_height: 0,
+        };
+        DwmExtendFrameIntoClientArea(hwnd, &margins);
         SetWindowPos(
             hwnd,
             std::ptr::null_mut(),

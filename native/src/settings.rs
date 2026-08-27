@@ -92,6 +92,10 @@ pub struct AppSettings {
     pub debug_mode: bool,
     #[serde(default)]
     pub lock_position: bool,
+    /// NVIDIA: opt-in DWM layered alpha. Off by default — auto-on caused a glass
+    /// frame on GPUs where per-pixel alpha already worked (v0.3.0).
+    #[serde(default)]
+    pub fix_gray_box: bool,
     #[serde(default)]
     pub manual_city: Option<ManualCity>,
     #[serde(default = "default_ball_scale")]
@@ -111,6 +115,7 @@ impl Default for AppSettings {
             day_night: DayNightPref::default(),
             debug_mode: false,
             lock_position: false,
+            fix_gray_box: false,
             manual_city: None,
             ball_scale: 1.0,
             ball_opacity: 1.0,
@@ -190,6 +195,12 @@ pub fn save_debug_mode(enabled: bool) {
 pub fn save_lock_position(enabled: bool) {
     let mut s = AppSettings::load_file().unwrap_or_default();
     s.lock_position = enabled;
+    s.save();
+}
+
+pub fn save_fix_gray_box(enabled: bool) {
+    let mut s = AppSettings::load_file().unwrap_or_default();
+    s.fix_gray_box = enabled;
     s.save();
 }
 
