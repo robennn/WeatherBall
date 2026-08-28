@@ -10,7 +10,7 @@
 | 技术 | Rust + egui，无 WebView | Vue 3 + Neutralino（WebView2） |
 | 特点 | 内存更低、无任务栏图标、托盘控制 | 浏览器可预览，样式便于改 CSS |
 
-天气数据来自 [Open-Meteo](https://open-meteo.com/)，位置先用 IP 定位，再逆地理到区县；失败时回退上海。约 20 分钟自动刷新。
+天气数据来自 [Open-Meteo](https://open-meteo.com/)，位置先用 IP 定位，再逆地理到区县；失败时回退上海。约 5 分钟自动刷新。
 
 ---
 
@@ -28,7 +28,7 @@
 
 ### 下载运行
 
-不解源码可直接下载 [**v0.3.3** 压缩包](https://github.com/robennn/WeatherBall/releases/download/v0.3.3/weatherball-native-windows-v0.3.3.zip)，解压后双击 `weatherball-native.exe`。也可以打开 [Releases](https://github.com/robennn/WeatherBall/releases/tag/v0.3.3) 页面下载。
+不解源码可直接下载 [**v0.3.4** 压缩包](https://github.com/robennn/WeatherBall/releases/download/v0.3.4/weatherball-native-windows-v0.3.4.zip)，解压后双击 `weatherball-native.exe`。也可以打开 [Releases](https://github.com/robennn/WeatherBall/releases/tag/v0.3.4) 页面下载。
 
 ### 自行编译
 

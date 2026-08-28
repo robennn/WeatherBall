@@ -199,6 +199,20 @@ fn shanghai() -> (f64, f64, String) {
     (31.2304, 121.4737, "上海".into())
 }
 
+fn describe_fetch_error(err: ureq::Error) -> String {
+    match err {
+        ureq::Error::Status(429, _) => "天气服务繁忙".into(),
+        ureq::Error::Status(_, _) => "天气服务异常".into(),
+        ureq::Error::Transport(t) => match t.kind() {
+            ureq::ErrorKind::Dns
+            | ureq::ErrorKind::ConnectionFailed
+            | ureq::ErrorKind::Io
+            | ureq::ErrorKind::ProxyConnect => "网络连接失败".into(),
+            _ => "天气请求失败".into(),
+        },
+    }
+}
+
 /// BigDataCloud reverse geocode — prefer district/county (区县), mirrors `src/services/geocode.ts`.
 fn reverse_geocode(lat: f64, lon: f64) -> Option<String> {
     #[derive(Deserialize)]
@@ -282,15 +296,19 @@ fn fetch_weather(lat: f64, lon: f64, city: String) -> Result<LiveWeather, String
     let resp = agent
         .get(&url)
         .call()
-        .map_err(|e| format!("天气请求失败: {e}"))?;
+        .map_err(describe_fetch_error)?;
 
     if !(200..300).contains(&resp.status()) {
-        return Err(format!("天气服务异常 ({})", resp.status()));
+        return Err(if resp.status() == 429 {
+            "天气服务繁忙".into()
+        } else {
+            "天气服务异常".into()
+        });
     }
 
     let data: OpenMeteo = resp
         .into_json()
-        .map_err(|e| format!("天气解析失败: {e}"))?;
+        .map_err(|_| "天气数据异常".to_string())?;
 
     let mapped = map_weather_code(data.current.weather_code);
     let precip = data.current.precipitation.unwrap_or(0.0);

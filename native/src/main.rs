@@ -57,7 +57,7 @@ fn set_paint_ball_r(r: f32) {
 
 /// Ball center from window top — same in compact & detail (Vue: stays put while height grows down).
 const BALL_CENTER_Y: f32 = 140.0;
-const REFRESH_SECS: u64 = 20 * 60;
+const REFRESH_SECS: u64 = 5 * 60;
 const DRAG_THRESHOLD: f32 = 5.0;
 /// Match Vue panel: height ~280ms, opacity a bit quicker.
 const DETAIL_ANIM_SECS: f32 = 0.28;
@@ -1710,19 +1710,26 @@ impl eframe::App for OrbApp {
 
                 // Tooltip only when mostly compact
                 if over_ball && compact_ui && !over_btn {
+                    let force_err = env_force_weather_error();
                     paint_tooltip(
                         ui,
-                        Pos2::new(center.x, center.y - ball_r() - 10.0),
+                        Pos2::new(center.x, center.y - ball_r() + 6.0),
                         rect,
-                        if self.debug_mode {
+                        if force_err {
+                            None
+                        } else if self.debug_mode {
                             self.preview_temp().or(temp)
                         } else {
                             temp
                         },
                         &desc,
                         &city,
-                        err.as_deref(),
-                        loading,
+                        if force_err {
+                            Some("天气请求失败")
+                        } else {
+                            err.as_deref()
+                        },
+                        loading && !force_err,
                         rain_hint.map(|s| s.hint()),
                     );
                 }
@@ -2561,6 +2568,27 @@ fn env_force_night() -> bool {
     )
 }
 
+fn env_force_weather_error() -> bool {
+    matches!(
+        std::env::var("WEATHERBALL_FORCE_ERROR").ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE")
+    )
+}
+
+fn display_weather_error(err: &str) -> &'static str {
+    if err.contains("解析") || err.contains("数据") {
+        "天气数据异常"
+    } else if err.contains("繁忙") {
+        "天气服务繁忙"
+    } else if err.contains("服务") {
+        "天气服务异常"
+    } else if err.contains("网络") || err.contains("连接") {
+        "网络连接失败"
+    } else {
+        "天气请求失败"
+    }
+}
+
 fn effective_is_day(pref: settings::DayNightPref, api_is_day: bool) -> bool {
     if env_force_night() {
         return false;
@@ -2877,7 +2905,7 @@ fn paint_detail_panel(
         p.text(
             Pos2::new(inner.min.x, y + 16.0),
             egui::Align2::LEFT_TOP,
-            "切换",
+            if is_manual { "自选城市" } else { "切换" },
             egui::FontId::proportional(10.0),
             with_opacity(theme.faint, opacity),
         );
@@ -2977,46 +3005,28 @@ fn paint_detail_panel(
     }
     y += 18.0;
 
-    // Hourly sparkline (Vue HourlyCurve layout)
+    const FOOTER_H: f32 = 22.0;
+    let debug_block = if debug_mode { 36.0 } else { 0.0 };
+    let footer_top = inner.max.y - FOOTER_H;
+    let content_bottom = (footer_top - debug_block).max(y);
+
+    // Hourly sparkline — shrink to leftover space so it never covers the footer.
     if let Some(data) = data {
         if !data.hourly.is_empty() {
-            let chart = Rect::from_min_size(
-                Pos2::new(inner.min.x, y),
-                Vec2::new(inner.width(), 96.0),
-            );
-            paint_hourly_curve(ui, chart, &data.hourly, opacity, theme);
-            y = chart.max.y + 8.0;
+            let chart_h = (content_bottom - 6.0 - y).clamp(0.0, 96.0);
+            if chart_h >= 40.0 {
+                let chart = Rect::from_min_size(
+                    Pos2::new(inner.min.x, y),
+                    Vec2::new(inner.width(), chart_h),
+                );
+                paint_hourly_curve(ui, chart, &data.hourly, opacity, interactive, theme);
+            }
         }
     }
-
-    // Updated time
-    let updated = data
-        .map(|d| format!("更新时间 {}", d.updated_hm))
-        .unwrap_or_else(|| "更新时间 --:--".into());
-    {
-        let p = ui.painter();
-        p.text(
-            Pos2::new(inner.min.x, y),
-            egui::Align2::LEFT_TOP,
-            updated,
-            egui::FontId::proportional(10.0),
-            with_opacity(theme.faint, opacity),
-        );
-        if is_manual {
-            p.text(
-                Pos2::new(inner.max.x, y),
-                egui::Align2::RIGHT_TOP,
-                "手动",
-                egui::FontId::proportional(10.0),
-                with_opacity(theme.accent, opacity),
-            );
-        }
-    }
-    y += 22.0;
 
     if debug_mode {
         let day_r = Rect::from_min_size(
-            Pos2::new(inner.min.x, y.min(inner.max.y - 64.0)),
+            Pos2::new(inner.min.x, footer_top - 36.0),
             Vec2::new(inner.width(), 28.0),
         );
         let day_btn = if interactive {
@@ -3035,27 +3045,52 @@ fn paint_detail_panel(
         if interactive && day_btn.clicked() {
             actions.cycle_day_night = true;
         }
-        y = day_r.max.y + 8.0;
     }
 
-    // Refresh button
-    let refresh_r = Rect::from_min_size(
-        Pos2::new(inner.min.x, y.min(inner.max.y - 30.0)),
-        Vec2::new(inner.width(), 28.0),
+    let updated = data
+        .map(|d| format!("更新于 {}", d.updated_hm))
+        .unwrap_or_else(|| "更新于 --:--".into());
+    let refresh_label = if loading { "刷新中" } else { "刷新" };
+    let refresh_font = egui::FontId::proportional(10.0);
+    let refresh_galley = ui.fonts(|f| {
+        f.layout_no_wrap(
+            refresh_label.to_string(),
+            refresh_font.clone(),
+            theme.accent,
+        )
+    });
+    let refresh_w = (refresh_galley.size().x + 8.0).max(36.0);
+    let refresh_r = Rect::from_min_max(
+        Pos2::new(inner.max.x - refresh_w, footer_top),
+        Pos2::new(inner.max.x, inner.max.y),
     );
     let refresh = if interactive {
         ui.allocate_rect(refresh_r, Sense::click())
     } else {
         ui.allocate_rect(refresh_r, Sense::hover())
     };
-    paint_button(
-        ui,
-        refresh_r,
-        if loading { "刷新中…" } else { "刷新天气" },
-        refresh.hovered() && interactive,
-        opacity,
-        theme,
-    );
+    {
+        let p = ui.painter();
+        p.text(
+            Pos2::new(inner.min.x, footer_top + 4.0),
+            egui::Align2::LEFT_TOP,
+            updated,
+            egui::FontId::proportional(10.0),
+            with_opacity(theme.faint, opacity),
+        );
+        let refresh_col = if refresh.hovered() && interactive {
+            theme.title_hover
+        } else {
+            theme.accent
+        };
+        p.text(
+            Pos2::new(inner.max.x, footer_top + 4.0),
+            egui::Align2::RIGHT_TOP,
+            refresh_label,
+            refresh_font,
+            with_opacity(refresh_col, opacity),
+        );
+    }
     if interactive && refresh.clicked() && !loading {
         actions.refresh = true;
     }
@@ -3265,9 +3300,9 @@ fn paint_settings_panel(
     }
 
     const HEADER_H: f32 = 28.0;
-    const SETTING_BLOCK: f32 = 56.0;
+    const SETTING_BLOCK: f32 = 64.0;
     const SLIDER_BLOCK: f32 = 54.0;
-    const CONTENT_H: f32 = SETTING_BLOCK * 4.0 + SLIDER_BLOCK * 2.0 + 6.0;
+    const CONTENT_H: f32 = SETTING_BLOCK * 4.0 + SLIDER_BLOCK * 2.0 + 8.0;
 
     let clip = ui.clip_rect().intersect(rect);
     let old_clip = ui.clip_rect();
@@ -3388,7 +3423,7 @@ fn paint_settings_panel(
         &mut cy,
         body,
         "修复灰框",
-        "独显出现不透明灰底时打开",
+        "独显出现灰底时再打开",
         gray_box_t,
         interactive,
         opacity,
@@ -3647,11 +3682,21 @@ fn paint_setting_row(
         Pos2::new(inner.min.x, *y),
         Vec2::new(inner.width(), row_h),
     );
-    *y = row.max.y + 6.0;
+    *y = row.max.y + 4.0;
+    let hint_font = egui::FontId::proportional(10.0);
+    let hint_wrap = (inner.width() - 4.0).max(64.0);
+    let hint_galley = ui.fonts(|f| {
+        f.layout(
+            hint.to_string(),
+            hint_font,
+            with_opacity(theme.faint, opacity),
+            hint_wrap,
+        )
+    });
     let hint_top = *y;
-    *y += 14.0;
+    *y += hint_galley.size().y.max(12.0) + 6.0;
 
-    if !row.intersects(viewport) {
+    if !row.intersects(viewport) && hint_top >= viewport.max.y {
         return Some(false);
     }
 
@@ -3688,11 +3733,9 @@ fn paint_setting_row(
         paint_pill_toggle(ui, pill, pill_t, row_hit.hovered() && interactive, opacity, theme);
     }
     if hint_top < viewport.max.y {
-        ui.painter().text(
+        ui.painter().galley(
             Pos2::new(inner.min.x + 2.0, hint_top),
-            egui::Align2::LEFT_TOP,
-            hint,
-            egui::FontId::proportional(10.0),
+            hint_galley,
             with_opacity(theme.faint, opacity),
         );
     }
@@ -4083,12 +4126,12 @@ fn paint_hourly_curve(
     rect: Rect,
     points: &[HourlyPoint],
     opacity: f32,
+    interactive: bool,
     theme: PanelTheme,
 ) {
     if points.len() < 2 {
         return;
     }
-    let p = ui.painter();
 
     let mut min_t = points
         .iter()
@@ -4109,22 +4152,25 @@ fn paint_hourly_curve(
     let end = &points[points.len() - 1];
 
     let mut y = rect.min.y;
-    p.text(
-        Pos2::new(rect.min.x, y),
-        egui::Align2::LEFT_TOP,
-        format!("气温走势 · {}小时", points.len()),
-        egui::FontId::proportional(10.0),
-        with_opacity(theme.faint, opacity),
-    );
-    y += 14.0;
-    p.text(
-        Pos2::new(rect.min.x, y),
-        egui::Align2::LEFT_TOP,
-        format!("最低 {low}° · 最高 {high}°"),
-        egui::FontId::proportional(9.0),
-        with_opacity(theme.muted, opacity),
-    );
-    y += 14.0;
+    {
+        let p = ui.painter();
+        p.text(
+            Pos2::new(rect.min.x, y),
+            egui::Align2::LEFT_TOP,
+            format!("气温走势 · {}小时", points.len()),
+            egui::FontId::proportional(10.0),
+            with_opacity(theme.faint, opacity),
+        );
+        y += 14.0;
+        p.text(
+            Pos2::new(rect.min.x, y),
+            egui::Align2::LEFT_TOP,
+            format!("最低 {low}° · 最高 {high}°"),
+            egui::FontId::proportional(9.0),
+            with_opacity(theme.muted, opacity),
+        );
+        y += 14.0;
+    }
 
     let spark = Rect::from_min_size(Pos2::new(rect.min.x, y), Vec2::new(rect.width(), 40.0));
     let pad_x = 2.0;
@@ -4153,18 +4199,47 @@ fn paint_hourly_curve(
     fill_under_polyline_aa(ui, &smooth, spark.max.y - 1.0, fill_col);
 
     let line_col = with_opacity(theme.curve_line, opacity);
-    // Wide faint stroke first so the thin line doesn't stair-step.
-    p.add(Shape::line(
-        smooth.clone(),
-        Stroke::new(3.2_f32, with_opacity(theme.curve_halo, opacity)),
-    ));
-    p.add(Shape::line(smooth, Stroke::new(1.8_f32, line_col)));
-    for pt in &path {
-        p.circle_filled(*pt, 1.6, with_opacity(theme.curve_dot, opacity));
+    {
+        let p = ui.painter();
+        p.add(Shape::line(
+            smooth.clone(),
+            Stroke::new(3.2_f32, with_opacity(theme.curve_halo, opacity)),
+        ));
+        p.add(Shape::line(smooth, Stroke::new(1.8_f32, line_col)));
+    }
+
+    if interactive {
+        ui.allocate_rect(spark, Sense::hover());
+    }
+    let hover_i = if interactive {
+        ui.input(|i| i.pointer.hover_pos()).and_then(|pos| {
+            let mut best_i = None;
+            let mut best_d = 11.0_f32;
+            for (i, pt) in path.iter().enumerate() {
+                let d = (*pt - pos).length();
+                if d <= best_d {
+                    best_d = d;
+                    best_i = Some(i);
+                }
+            }
+            best_i
+        })
+    } else {
+        None
+    };
+
+    for (i, pt) in path.iter().enumerate() {
+        let hovered = hover_i == Some(i);
+        let r = if hovered { 3.2 } else { 1.6 };
+        let p = ui.painter();
+        p.circle_filled(*pt, r, with_opacity(theme.curve_dot, opacity));
         p.circle_stroke(
             *pt,
-            1.6,
-            Stroke::new(0.6_f32, with_opacity(theme.curve_line, opacity)),
+            r,
+            Stroke::new(
+                if hovered { 1.0_f32 } else { 0.6_f32 },
+                with_opacity(theme.curve_line, opacity),
+            ),
         );
     }
 
@@ -4175,20 +4250,74 @@ fn paint_hourly_curve(
         start.temperature.round() as i32
     );
     let end_s = format!("{}时 {}°", end.hour, end.temperature.round() as i32);
-    p.text(
-        Pos2::new(rect.min.x, y),
-        egui::Align2::LEFT_TOP,
-        start_s,
-        egui::FontId::proportional(9.0),
-        with_opacity(theme.faint, opacity),
+    {
+        let p = ui.painter();
+        p.text(
+            Pos2::new(rect.min.x, y),
+            egui::Align2::LEFT_TOP,
+            start_s,
+            egui::FontId::proportional(9.0),
+            with_opacity(theme.faint, opacity),
+        );
+        p.text(
+            Pos2::new(rect.max.x, y),
+            egui::Align2::RIGHT_TOP,
+            end_s,
+            egui::FontId::proportional(9.0),
+            with_opacity(theme.faint, opacity),
+        );
+    }
+
+    if let Some(i) = hover_i {
+        if let Some(src) = points.get(i) {
+            let label = format!("{}时  {}°", src.hour, src.temperature.round() as i32);
+            paint_curve_hover_tip(ui, path[i], rect, &label, opacity, theme);
+            ui.ctx().request_repaint();
+        }
+    }
+}
+
+fn paint_curve_hover_tip(
+    ui: &mut egui::Ui,
+    at: Pos2,
+    bounds: Rect,
+    text: &str,
+    opacity: f32,
+    theme: PanelTheme,
+) {
+    let font = egui::FontId::proportional(11.0);
+    let color = with_opacity(theme.title, opacity);
+    let galley = ui.fonts(|f| f.layout_no_wrap(text.to_string(), font, color));
+    let pad = Vec2::new(7.0, 4.0);
+    let size = galley.size() + pad * 2.0;
+    let mut x = at.x - size.x * 0.5;
+    x = x.clamp(bounds.min.x + 2.0, (bounds.max.x - 2.0 - size.x).max(bounds.min.x + 2.0));
+    let mut y = at.y - size.y - 8.0;
+    if y < bounds.min.y + 2.0 {
+        y = at.y + 8.0;
+    }
+    if y + size.y > bounds.max.y - 2.0 {
+        y = (bounds.max.y - 2.0 - size.y).max(bounds.min.y + 2.0);
+    }
+    let tip = Rect::from_min_size(Pos2::new(x, y), size);
+    let old_clip = ui.clip_rect();
+    ui.set_clip_rect(old_clip.union(tip.expand(2.0)));
+    let p = ui.painter();
+    p.rect_filled(
+        tip,
+        7.0,
+        with_opacity(Color32::from_rgba_unmultiplied(12, 18, 32, 246), opacity),
     );
-    p.text(
-        Pos2::new(rect.max.x, y),
-        egui::Align2::RIGHT_TOP,
-        end_s,
-        egui::FontId::proportional(9.0),
-        with_opacity(theme.faint, opacity),
+    p.rect_stroke(
+        tip,
+        7.0,
+        Stroke::new(
+            1.0_f32,
+            with_opacity(Color32::from_rgba_unmultiplied(255, 255, 255, 48), opacity),
+        ),
     );
+    p.galley(tip.min + pad, galley, color);
+    ui.set_clip_rect(old_clip);
 }
 
 /// Catmull-Rom samples so the stroke tessellates as short segments (less stair-step).
@@ -4322,19 +4451,11 @@ fn paint_tooltip(
         ));
     } else if let (None, Some(err)) = (temp, error) {
         lines.push((
-            err.to_string(),
+            display_weather_error(err).to_string(),
             Color32::from_rgba_unmultiplied(255, 180, 140, 240),
-            11.0,
+            12.0,
             LineKind::Body,
         ));
-        if !city.is_empty() {
-            lines.push((
-                city.to_string(),
-                Color32::from_rgba_unmultiplied(160, 170, 190, 200),
-                11.0,
-                LineKind::Body,
-            ));
-        }
     } else {
         let temp_s = temp
             .map(|t| format!("{}", t.round() as i32))
@@ -4369,9 +4490,9 @@ fn paint_tooltip(
                 LineKind::Body,
             ));
         }
-        if let Some(err) = error {
+        if error.is_some() {
             lines.push((
-                err.to_string(),
+                "刷新失败".into(),
                 Color32::from_rgba_unmultiplied(255, 180, 140, 220),
                 11.0,
                 LineKind::Body,
@@ -4379,13 +4500,17 @@ fn paint_tooltip(
         }
     }
 
-    let pad_x = 16.0;
-    let pad_y = 10.0;
-    let gap = 3.0;
+    let margin = 10.0;
+    let pad_x = 10.0;
+    let pad_y = 6.0;
+    let gap = 2.0;
+    let max_w = (bounds.width() - margin * 2.0).clamp(88.0, 140.0);
+    let wrap_w = (max_w - pad_x * 2.0).max(72.0);
 
-    // Pre-measure: temp line is digits + "°" drawn separately for optical center
-    let mut row_w = 64.0_f32;
+    let mut row_w = 0.0_f32;
     let mut row_h = Vec::with_capacity(lines.len());
+    let mut body_galleys = Vec::with_capacity(lines.len());
+
     for (text, color, size, kind) in &lines {
         let font = egui::FontId::proportional(*size);
         match kind {
@@ -4395,21 +4520,21 @@ fn paint_tooltip(
                     f.layout_no_wrap("°".to_owned(), font, Color32::from_rgb(244, 247, 251))
                 });
                 row_w = row_w.max(num.size().x + deg.size().x * 0.55);
-                row_h.push(num.size().y.max(24.0));
+                row_h.push(num.size().y.max(22.0));
+                body_galleys.push((Some(num), Some(deg), *color, *kind));
             }
             LineKind::Body => {
-                let g = ui.fonts(|f| f.layout_no_wrap(text.clone(), font, *color));
+                let g = ui.fonts(|f| f.layout(text.clone(), font, *color, wrap_w));
                 row_w = row_w.max(g.size().x);
                 row_h.push(g.size().y.max(14.0));
+                body_galleys.push((Some(g), None, *color, *kind));
             }
         }
     }
 
-    let width = row_w + pad_x * 2.0;
+    let width = (row_w + pad_x * 2.0).min(max_w);
     let height = pad_y * 2.0 + row_h.iter().sum::<f32>() + gap * (lines.len().saturating_sub(1) as f32);
 
-    // Prefer above the ball; if clipped by window top, shift down so full card is visible
-    let margin = 6.0;
     let mut tip = Rect::from_center_size(
         Pos2::new(anchor_bottom.x, anchor_bottom.y - height * 0.5),
         Vec2::new(width, height),
@@ -4417,53 +4542,60 @@ fn paint_tooltip(
     if tip.min.y < bounds.min.y + margin {
         tip = tip.translate(Vec2::new(0.0, bounds.min.y + margin - tip.min.y));
     }
+    if tip.max.y > bounds.max.y - margin {
+        tip = tip.translate(Vec2::new(0.0, bounds.max.y - margin - tip.max.y));
+    }
     if tip.max.x > bounds.max.x - margin {
         tip = tip.translate(Vec2::new(bounds.max.x - margin - tip.max.x, 0.0));
     }
     if tip.min.x < bounds.min.x + margin {
         tip = tip.translate(Vec2::new(bounds.min.x + margin - tip.min.x, 0.0));
     }
+    // If the card is still wider than the hwnd, shrink in place.
+    if tip.width() > bounds.width() - margin * 2.0 {
+        tip.min.x = bounds.min.x + margin;
+        tip.max.x = bounds.max.x - margin;
+    }
 
-    // Draw outside default clip so rounded top isn't cut by panel edges
-    let p = ui.painter().with_clip_rect(bounds.expand(2.0));
-    p.rect_filled(tip, 14.0, Color32::from_rgba_unmultiplied(12, 18, 32, 242));
+    let old_clip = ui.clip_rect();
+    ui.set_clip_rect(old_clip.expand(24.0).union(tip.expand(2.0)));
+    let p = ui.painter();
+    p.rect_filled(tip, 8.0, Color32::from_rgba_unmultiplied(12, 18, 32, 242));
     p.rect_stroke(
         tip,
-        14.0,
+        8.0,
         Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 50)),
     );
 
     let cx = tip.center().x;
     let mut y = tip.min.y + pad_y;
-    for (i, (text, color, size, kind)) in lines.iter().enumerate() {
-        let font = egui::FontId::proportional(*size);
+    for (i, (num, deg, color, kind)) in body_galleys.into_iter().enumerate() {
         let h = row_h[i];
         match kind {
             LineKind::Temp => {
-                // Center on digits; place "°" tight to the right (avoids ° pulling visual center)
-                let num = ui.fonts(|f| f.layout_no_wrap(text.clone(), font.clone(), *color));
-                let deg = ui.fonts(|f| {
-                    f.layout_no_wrap("°".to_owned(), font, *color)
-                });
+                let num = num.expect("temp galley");
+                let deg = deg.expect("deg galley");
                 let pair_w = num.size().x + deg.size().x * 0.35;
                 let num_x = cx - pair_w * 0.5;
                 let num_y = y + (h - num.size().y) * 0.5;
-                p.galley(Pos2::new(num_x, num_y), num.clone(), *color);
-                p.galley(
-                    Pos2::new(num_x + num.size().x - 1.0, num_y - 1.0),
-                    deg,
-                    *color,
-                );
+                let deg_x = num_x + num.size().x - 1.0;
+                p.galley(Pos2::new(num_x, num_y), num, color);
+                p.galley(Pos2::new(deg_x, num_y - 1.0), deg, color);
             }
             LineKind::Body => {
-                let g = ui.fonts(|f| f.layout_no_wrap(text.clone(), font, *color));
-                let x = cx - g.size().x * 0.5;
+                let g = num.expect("body galley");
+                let x = if g.size().x <= wrap_w - 1.0 {
+                    cx - g.size().x * 0.5
+                } else {
+                    tip.min.x + pad_x
+                };
                 let gy = y + (h - g.size().y) * 0.5;
-                p.galley(Pos2::new(x, gy), g, *color);
+                p.galley(Pos2::new(x, gy), g, color);
             }
         }
         y += h + gap;
     }
+    ui.set_clip_rect(old_clip);
 }
 
 fn make_drops(scene: Scene) -> Vec<Drop> {
