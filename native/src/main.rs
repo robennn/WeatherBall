@@ -24,8 +24,8 @@ mod settings;
 mod weather;
 
 use eframe::egui::{
-    self, Color32, ColorImage, Pos2, Rect, Sense, Shape, Stroke, TextureHandle, TextureOptions,
-    Vec2,
+    self, Color32, ColorImage, PointerButton, Pos2, Rect, Sense, Shape, Stroke, TextureHandle,
+    TextureOptions, Vec2,
 };
 use std::f32::consts::{PI, TAU};
 use std::io::Read;
@@ -1151,6 +1151,7 @@ impl eframe::App for OrbApp {
             let hwnd = self.main_hwnd.load(Ordering::Relaxed);
             if hwnd != 0 {
                 hide_hwnd_from_taskbar(hwnd);
+                ensure_orb_click_guard(hwnd);
                 self.taskbar_hidden = true;
             }
         }
@@ -1634,11 +1635,14 @@ impl eframe::App for OrbApp {
                 let ball = ui.interact(hit, ui.id().with("orb-drag"), Sense::click_and_drag());
 
                 if over_ball && !over_btn {
-                    if ball.drag_started() {
+                    if ball.drag_started_by(PointerButton::Primary) {
                         self.press_pos = ball.interact_pointer_pos();
                         self.suppress_click = false;
                     }
-                    if !self.lock_position && ball.dragged() && !self.dragging {
+                    if !self.lock_position
+                        && ball.dragged_by(PointerButton::Primary)
+                        && !self.dragging
+                    {
                         if let (Some(start), Some(cur)) =
                             (self.press_pos, ball.interact_pointer_pos())
                         {
@@ -5526,6 +5530,96 @@ fn win_run_message_loop() {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+    }
+}
+
+/// winit/DWM can still report HTCAPTION on this borderless hwnd (NVIDIA in
+/// particular). A first right-click then opens the system window menu on the
+/// GL thread and the process dies; a prior left-click activates the window so
+/// later right-clicks arrive as client WM_RBUTTON and settings open normally.
+#[cfg(target_os = "windows")]
+static ORB_WNDPROC_ORIG: AtomicIsize = AtomicIsize::new(0);
+
+#[cfg(target_os = "windows")]
+fn ensure_orb_click_guard(hwnd_val: isize) {
+    if hwnd_val == 0 {
+        return;
+    }
+    const GWLP_WNDPROC: i32 = -4;
+    extern "system" {
+        fn GetWindowLongPtrW(h_wnd: *mut std::ffi::c_void, n_index: i32) -> isize;
+        fn SetWindowLongPtrW(h_wnd: *mut std::ffi::c_void, n_index: i32, dw_new_long: isize) -> isize;
+    }
+    let hwnd = hwnd_val as *mut std::ffi::c_void;
+    let ours = orb_wndproc as *const () as isize;
+    let current = unsafe { GetWindowLongPtrW(hwnd, GWLP_WNDPROC) };
+    if current == ours {
+        return;
+    }
+    let orig = unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, ours) };
+    if orig == ours {
+        return;
+    }
+    ORB_WNDPROC_ORIG.store(orig, Ordering::Relaxed);
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn orb_wndproc(
+    hwnd: *mut std::ffi::c_void,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+) -> isize {
+    const WM_NCHITTEST: u32 = 0x0084;
+    const WM_NCRBUTTONDOWN: u32 = 0x00A4;
+    const WM_NCRBUTTONUP: u32 = 0x00A5;
+    const WM_NCRBUTTONDBLCLK: u32 = 0x00A6;
+    const WM_CONTEXTMENU: u32 = 0x007B;
+    const WM_SYSCOMMAND: u32 = 0x0112;
+    const SC_KEYMENU: usize = 0xF100;
+    const SC_MOUSEMENU: usize = 0xF090;
+    const HTCLIENT: isize = 1;
+    const HTTRANSPARENT: isize = -1;
+
+    extern "system" {
+        fn CallWindowProcW(
+            prev: isize,
+            h_wnd: *mut std::ffi::c_void,
+            msg: u32,
+            wparam: usize,
+            lparam: isize,
+        ) -> isize;
+        fn DefWindowProcW(
+            h_wnd: *mut std::ffi::c_void,
+            msg: u32,
+            wparam: usize,
+            lparam: isize,
+        ) -> isize;
+    }
+
+    let orig = ORB_WNDPROC_ORIG.load(Ordering::Relaxed);
+    let call_prev = |msg: u32, wparam: usize, lparam: isize| -> isize {
+        if orig == 0 {
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        } else {
+            unsafe { CallWindowProcW(orig, hwnd, msg, wparam, lparam) }
+        }
+    };
+
+    match msg {
+        WM_NCHITTEST => {
+            let hit = call_prev(msg, wparam, lparam);
+            if hit == HTTRANSPARENT {
+                hit
+            } else if hit != HTCLIENT {
+                HTCLIENT
+            } else {
+                hit
+            }
+        }
+        WM_NCRBUTTONDOWN | WM_NCRBUTTONUP | WM_NCRBUTTONDBLCLK | WM_CONTEXTMENU => 0,
+        WM_SYSCOMMAND if (wparam & 0xFFF0) == SC_KEYMENU || (wparam & 0xFFF0) == SC_MOUSEMENU => 0,
+        _ => call_prev(msg, wparam, lparam),
     }
 }
 
