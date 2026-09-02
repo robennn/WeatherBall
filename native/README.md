@@ -1,6 +1,6 @@
 # WeatherBall Native
 
-当前打包版本：**v0.3.5**（[GitHub Releases](https://github.com/robennn/WeatherBall/releases/tag/v0.3.5)）。
+当前打包版本：**v0.3.6**（[GitHub Releases](https://github.com/robennn/WeatherBall/releases/tag/v0.3.6)）。
 
 无 WebView 的透明悬浮球：`eframe` + `egui`，内存远低于 Neutralino / WebView2 版。
 

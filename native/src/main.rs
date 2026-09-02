@@ -30,7 +30,7 @@ use eframe::egui::{
 use std::f32::consts::{PI, TAU};
 use std::io::Read;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -1700,16 +1700,27 @@ impl eframe::App for OrbApp {
                     }
                 }
 
-                // Sending MousePassthrough every frame storms Win32 and can freeze the orb.
-                let passthrough = !self.dragging
-                    && !(over_ball
-                        || over_btn
-                        || over_panel
-                        || self.city_picker.open
-                        || self.settings_open);
-                if self.last_passthrough != Some(passthrough) {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(passthrough));
-                    self.last_passthrough = Some(passthrough);
+                // Click-through is WM_NCHITTEST → HTTRANSPARENT (see orb_wndproc).
+                // Do not use ViewportCommand::MousePassthrough: that sets
+                // WS_EX_TRANSPARENT|WS_EX_LAYERED, and NVIDIA still delivers
+                // right-clicks to that combo (left-clicks pass through) which
+                // crashes the GL driver. A prior left-click only "fixed" it
+                // because hover had already cleared TRANSPARENT.
+                publish_orb_hit_regions(
+                    self.main_hwnd.load(Ordering::Relaxed),
+                    center,
+                    ball_r() + 2.0,
+                    if btn_rect.width() > 1.0 {
+                        Some(btn_rect)
+                    } else {
+                        None
+                    },
+                    panel_rect.filter(|_| panel_opacity > 0.5),
+                    self.dragging,
+                );
+                if self.last_passthrough != Some(false) {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(false));
+                    self.last_passthrough = Some(false);
                 }
 
                 // Tooltip only when mostly compact
@@ -5477,6 +5488,7 @@ fn run_tray_thread(
             Err(_) => thread::sleep(Duration::from_millis(250)),
         }
     };
+    harden_tray_hwnd();
     win_run_message_loop();
 }
 
@@ -5497,6 +5509,34 @@ fn build_native_tray_icon(
         .with_icon(icon)
         .build()?)
 }
+
+/// tray-icon creates a hidden WS_EX_TRANSPARENT|WS_EX_LAYERED owner hwnd.
+/// TrackPopupMenu on that combo crashes NVIDIA the first time (left-click on
+/// the tray "warms" it). Strip those styles; TOOLWINDOW+NOACTIVATE stay.
+#[cfg(target_os = "windows")]
+fn harden_tray_hwnd() {
+    let hwnd = win_find_window_class("tray_icon_app");
+    if hwnd == 0 {
+        return;
+    }
+    const GWL_EXSTYLE: i32 = -20;
+    const WS_EX_TRANSPARENT: isize = 0x0000_0020;
+    const WS_EX_LAYERED: isize = 0x0008_0000;
+    extern "system" {
+        fn GetWindowLongPtrW(h_wnd: *mut std::ffi::c_void, n_index: i32) -> isize;
+        fn SetWindowLongPtrW(h_wnd: *mut std::ffi::c_void, n_index: i32, dw_new_long: isize) -> isize;
+    }
+    let h = hwnd as *mut std::ffi::c_void;
+    let ex = unsafe { GetWindowLongPtrW(h, GWL_EXSTYLE) };
+    let next = ex & !(WS_EX_TRANSPARENT | WS_EX_LAYERED);
+    if next != ex {
+        unsafe { SetWindowLongPtrW(h, GWL_EXSTYLE, next) };
+    }
+    win_post_null(hwnd);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn harden_tray_hwnd() {}
 
 #[cfg(target_os = "windows")]
 fn win_run_message_loop() {
@@ -5533,12 +5573,102 @@ fn win_run_message_loop() {
     }
 }
 
-/// winit/DWM can still report HTCAPTION on this borderless hwnd (NVIDIA in
-/// particular). A first right-click then opens the system window menu on the
-/// GL thread and the process dies; a prior left-click activates the window so
-/// later right-clicks arrive as client WM_RBUTTON and settings open normally.
+/// Physical hit regions for WM_NCHITTEST. Outside these, return HTTRANSPARENT
+/// so clicks (including right-clicks) go to the window below — without ever
+/// setting WS_EX_TRANSPARENT, which NVIDIA mishandles on layered GL hwnds.
+#[cfg(target_os = "windows")]
+static HIT_BALL_X: AtomicI32 = AtomicI32::new(0);
+#[cfg(target_os = "windows")]
+static HIT_BALL_Y: AtomicI32 = AtomicI32::new(0);
+#[cfg(target_os = "windows")]
+static HIT_BALL_R: AtomicI32 = AtomicI32::new(0);
+#[cfg(target_os = "windows")]
+static HIT_RECT: [AtomicI32; 8] = [
+    AtomicI32::new(0),
+    AtomicI32::new(0),
+    AtomicI32::new(0),
+    AtomicI32::new(0),
+    AtomicI32::new(0),
+    AtomicI32::new(0),
+    AtomicI32::new(0),
+    AtomicI32::new(0),
+];
+#[cfg(target_os = "windows")]
+static HIT_DRAG: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "windows")]
 static ORB_WNDPROC_ORIG: AtomicIsize = AtomicIsize::new(0);
+
+fn publish_orb_hit_regions(
+    hwnd: isize,
+    ball_center: Pos2,
+    ball_r: f32,
+    btn: Option<Rect>,
+    panel: Option<Rect>,
+    dragging: bool,
+) {
+    #[cfg(target_os = "windows")]
+    {
+        let (ox, oy, scale) = display::window_origin_and_scale(hwnd).unwrap_or((0.0, 0.0, 1.0));
+        let to = |p: Pos2| (ox + p.x * scale, oy + p.y * scale);
+        let (bx, by) = to(ball_center);
+        HIT_BALL_X.store(bx.round() as i32, Ordering::Relaxed);
+        HIT_BALL_Y.store(by.round() as i32, Ordering::Relaxed);
+        HIT_BALL_R.store((ball_r * scale).ceil().max(1.0) as i32, Ordering::Relaxed);
+        HIT_DRAG.store(dragging, Ordering::Relaxed);
+        store_hit_rect(0, btn, ox, oy, scale);
+        store_hit_rect(4, panel, ox, oy, scale);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (hwnd, ball_center, ball_r, btn, panel, dragging);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn store_hit_rect(slot: usize, rect: Option<Rect>, ox: f32, oy: f32, scale: f32) {
+    let Some(r) = rect.filter(|r| r.width() > 1.0 && r.height() > 1.0) else {
+        for i in 0..4 {
+            HIT_RECT[slot + i].store(0, Ordering::Relaxed);
+        }
+        return;
+    };
+    let l = (ox + r.min.x * scale).floor() as i32;
+    let t = (oy + r.min.y * scale).floor() as i32;
+    let right = (ox + r.max.x * scale).ceil() as i32;
+    let b = (oy + r.max.y * scale).ceil() as i32;
+    HIT_RECT[slot].store(l, Ordering::Relaxed);
+    HIT_RECT[slot + 1].store(t, Ordering::Relaxed);
+    HIT_RECT[slot + 2].store(right, Ordering::Relaxed);
+    HIT_RECT[slot + 3].store(b, Ordering::Relaxed);
+}
+
+#[cfg(target_os = "windows")]
+fn orb_hit_screen(x: i32, y: i32) -> bool {
+    if HIT_DRAG.load(Ordering::Relaxed) {
+        return true;
+    }
+    let bx = HIT_BALL_X.load(Ordering::Relaxed);
+    let by = HIT_BALL_Y.load(Ordering::Relaxed);
+    let br = HIT_BALL_R.load(Ordering::Relaxed);
+    if br > 0 {
+        let dx = (x - bx) as i64;
+        let dy = (y - by) as i64;
+        let r = br as i64;
+        if dx * dx + dy * dy <= r * r {
+            return true;
+        }
+    }
+    for slot in [0usize, 4] {
+        let l = HIT_RECT[slot].load(Ordering::Relaxed);
+        let t = HIT_RECT[slot + 1].load(Ordering::Relaxed);
+        let right = HIT_RECT[slot + 2].load(Ordering::Relaxed);
+        let b = HIT_RECT[slot + 3].load(Ordering::Relaxed);
+        if right > l && b > t && x >= l && x < right && y >= t && y < b {
+            return true;
+        }
+    }
+    false
+}
 
 #[cfg(target_os = "windows")]
 fn ensure_orb_click_guard(hwnd_val: isize) {
@@ -5608,13 +5738,13 @@ unsafe extern "system" fn orb_wndproc(
 
     match msg {
         WM_NCHITTEST => {
-            let hit = call_prev(msg, wparam, lparam);
-            if hit == HTTRANSPARENT {
-                hit
-            } else if hit != HTCLIENT {
+            let packed = lparam as u32;
+            let x = packed as i16 as i32;
+            let y = (packed >> 16) as i16 as i32;
+            if orb_hit_screen(x, y) {
                 HTCLIENT
             } else {
-                hit
+                HTTRANSPARENT
             }
         }
         WM_NCRBUTTONDOWN | WM_NCRBUTTONUP | WM_NCRBUTTONDBLCLK | WM_CONTEXTMENU => 0,
