@@ -771,6 +771,57 @@ fn main() -> eframe::Result<()> {
 /// Invisible hwnd title. Empty titles make some DWM paths paint "Normal".
 const SILENT_WINDOW_TITLE: &str = "\u{00A0}";
 
+// #region agent log
+fn agent_dbg(hyp: &str, loc: &str, msg: &str, data_json: &str) {
+    use std::io::Write;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let line = format!(
+        "{{\"sessionId\":\"a1d3f1\",\"runId\":\"pre-fix\",\"hypothesisId\":\"{hyp}\",\"location\":\"{loc}\",\"message\":\"{msg}\",\"data\":{data_json},\"timestamp\":{ts}}}\n"
+    );
+    let mut paths = vec![
+        std::path::PathBuf::from(r"f:\vue1\WeatherBall\debug-a1d3f1.log"),
+    ];
+    if let Some(dir) = settings::app_dir() {
+        paths.push(dir.join("debug-a1d3f1.log"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            paths.push(dir.join("debug-a1d3f1.log"));
+        }
+    }
+    for path in paths {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = f.write_all(line.as_bytes());
+            let _ = f.flush();
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn agent_exstyle(hwnd: isize) -> isize {
+    const GWL_EXSTYLE: i32 = -20;
+    extern "system" {
+        fn GetWindowLongPtrW(h_wnd: *mut std::ffi::c_void, n_index: i32) -> isize;
+    }
+    if hwnd == 0 {
+        return 0;
+    }
+    unsafe { GetWindowLongPtrW(hwnd as *mut std::ffi::c_void, GWL_EXSTYLE) }
+}
+
+#[cfg(target_os = "windows")]
+fn agent_rbutton_down() -> bool {
+    const VK_RBUTTON: i32 = 0x02;
+    extern "system" {
+        fn GetAsyncKeyState(vkey: i32) -> i16;
+    }
+    (unsafe { GetAsyncKeyState(VK_RBUTTON) } as u16) & 0x8000 != 0
+}
+// #endregion
+
 /// Reject faces that cannot actually draw CJK. A broken TTC face often maps
 /// every character to one glyph and rasterizes the style name "Normal".
 fn face_has_distinct_cjk(bytes: &[u8], index: u32) -> bool {
@@ -1689,6 +1740,28 @@ impl eframe::App for OrbApp {
                         }
                     }
                     if ball.secondary_clicked() {
+                        // #region agent log
+                        agent_dbg(
+                            "H4",
+                            "main.rs:secondary_clicked",
+                            "orb right-click opened settings path",
+                            &format!(
+                                "{{\"settings_open\":{},\"detail_open\":{},\"exstyle\":{}}}",
+                                self.settings_open,
+                                self.detail_open,
+                                {
+                                    #[cfg(target_os = "windows")]
+                                    {
+                                        agent_exstyle(self.main_hwnd.load(Ordering::Relaxed))
+                                    }
+                                    #[cfg(not(target_os = "windows"))]
+                                    {
+                                        0
+                                    }
+                                }
+                            ),
+                        );
+                        // #endregion
                         if self.settings_open {
                             self.settings_open = false;
                         } else {
@@ -2004,12 +2077,21 @@ fn spawn_tray_menu_wake(
                 break;
             };
             let TrayIconEvent::Click {
+                button,
                 button_state: MouseButtonState::Down,
                 ..
             } = ev
             else {
                 continue;
             };
+            // #region agent log
+            agent_dbg(
+                "H3",
+                "main.rs:tray_click",
+                "tray icon button down",
+                &format!("{{\"button\":\"{button:?}\"}}"),
+            );
+            // #endregion
             let visible = Arc::clone(&window_visible);
             let hwnd = Arc::clone(&main_hwnd);
             let ctx = ctx.clone();
@@ -5533,6 +5615,14 @@ fn harden_tray_hwnd() {
         unsafe { SetWindowLongPtrW(h, GWL_EXSTYLE, next) };
     }
     win_post_null(hwnd);
+    // #region agent log
+    agent_dbg(
+        "H3",
+        "main.rs:harden_tray_hwnd",
+        "tray hwnd styles after harden",
+        &format!("{{\"hwnd\":{hwnd},\"ex_before\":{ex},\"ex_after\":{}}}", agent_exstyle(hwnd)),
+    );
+    // #endregion
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -5691,6 +5781,22 @@ fn ensure_orb_click_guard(hwnd_val: isize) {
         return;
     }
     ORB_WNDPROC_ORIG.store(orig, Ordering::Relaxed);
+    // #region agent log
+    static GUARD_LOGS: AtomicU32 = AtomicU32::new(0);
+    let n = GUARD_LOGS.fetch_add(1, Ordering::Relaxed);
+    if n < 4 {
+        agent_dbg(
+            "H2",
+            "main.rs:ensure_orb_click_guard",
+            "installed or reinstalled orb wndproc",
+            &format!(
+                "{{\"hwnd\":{hwnd_val},\"exstyle\":{},\"n\":{}}}",
+                agent_exstyle(hwnd_val),
+                n
+            ),
+        );
+    }
+    // #endregion
 }
 
 #[cfg(target_os = "windows")]
@@ -5741,15 +5847,64 @@ unsafe extern "system" fn orb_wndproc(
             let packed = lparam as u32;
             let x = packed as i16 as i32;
             let y = (packed >> 16) as i16 as i32;
-            if orb_hit_screen(x, y) {
+            let hit = orb_hit_screen(x, y);
+            // #region agent log
+            if agent_rbutton_down() {
+                static NCHIT_LOGS: AtomicU32 = AtomicU32::new(0);
+                if NCHIT_LOGS.fetch_add(1, Ordering::Relaxed) < 8 {
+                    let hwnd_val = hwnd as isize;
+                    agent_dbg(
+                        "H1",
+                        "main.rs:orb_wndproc:nchittest",
+                        "nchittest while right button down",
+                        &format!(
+                            "{{\"x\":{x},\"y\":{y},\"hit\":{hit},\"exstyle\":{}}}",
+                            agent_exstyle(hwnd_val)
+                        ),
+                    );
+                }
+            }
+            // #endregion
+            if hit {
                 HTCLIENT
             } else {
                 HTTRANSPARENT
             }
         }
-        WM_NCRBUTTONDOWN | WM_NCRBUTTONUP | WM_NCRBUTTONDBLCLK | WM_CONTEXTMENU => 0,
+        WM_NCRBUTTONDOWN | WM_NCRBUTTONUP | WM_NCRBUTTONDBLCLK | WM_CONTEXTMENU => {
+            // #region agent log
+            agent_dbg(
+                "H5",
+                "main.rs:orb_wndproc:nc_right",
+                "nonclient or context-menu message",
+                &format!(
+                    "{{\"msg\":{msg},\"exstyle\":{}}}",
+                    agent_exstyle(hwnd as isize)
+                ),
+            );
+            // #endregion
+            0
+        }
         WM_SYSCOMMAND if (wparam & 0xFFF0) == SC_KEYMENU || (wparam & 0xFFF0) == SC_MOUSEMENU => 0,
-        _ => call_prev(msg, wparam, lparam),
+        _ => {
+            // #region agent log
+            const WM_LBUTTONDOWN: u32 = 0x0201;
+            const WM_RBUTTONDOWN: u32 = 0x0204;
+            const WM_RBUTTONUP: u32 = 0x0205;
+            if msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP {
+                agent_dbg(
+                    "H2",
+                    "main.rs:orb_wndproc:button",
+                    "client mouse button",
+                    &format!(
+                        "{{\"msg\":{msg},\"exstyle\":{}}}",
+                        agent_exstyle(hwnd as isize)
+                    ),
+                );
+            }
+            // #endregion
+            call_prev(msg, wparam, lparam)
+        }
     }
 }
 
