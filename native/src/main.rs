@@ -3400,6 +3400,7 @@ fn paint_settings_panel(
     const SETTING_BLOCK: f32 = 64.0;
     const SLIDER_BLOCK: f32 = 54.0;
     const CONTENT_H: f32 = SETTING_BLOCK * 4.0 + SLIDER_BLOCK * 2.0 + 8.0;
+    const MIN_INNER_H: f32 = HEADER_H + 32.0;
 
     let clip = ui.clip_rect().intersect(rect);
     let old_clip = ui.clip_rect();
@@ -3407,6 +3408,25 @@ fn paint_settings_panel(
     paint_panel_card(ui, rect, opacity, theme, skin_tex);
 
     let pad = 14.0;
+    // Opening settings from compact animates a ~10px card. shrink(14) inverts
+    // the inner rect and the old 4000px layout tessellates off-screen — NVIDIA dies.
+    // Left-click first expands the panel, so this path never ran.
+    if rect.height() < pad * 2.0 + MIN_INNER_H {
+        // #region agent log
+        static SKIP_LOGS: AtomicU32 = AtomicU32::new(0);
+        if SKIP_LOGS.fetch_add(1, Ordering::Relaxed) < 6 {
+            agent_dbg(
+                "H4",
+                "main.rs:paint_settings_panel",
+                "skip settings content while panel too short",
+                &format!("{{\"h\":{},\"w\":{}}}", rect.height(), rect.width()),
+            );
+        }
+        // #endregion
+        ui.set_clip_rect(old_clip);
+        return actions;
+    }
+
     let inner = rect.shrink(pad);
     let mut y = inner.min.y;
 
@@ -3460,7 +3480,10 @@ fn paint_settings_panel(
     let gutter = if max_scroll > 1.0 { 8.0 } else { 0.0 };
     let layout = Rect::from_min_max(
         Pos2::new(inner.min.x, inner.min.y),
-        Pos2::new((inner.max.x - gutter).max(inner.min.x + 40.0), inner.min.y + 4000.0),
+        Pos2::new(
+            (inner.max.x - gutter).max(inner.min.x + 40.0),
+            inner.min.y + CONTENT_H + 8.0,
+        ),
     );
 
     ui.set_clip_rect(clip.intersect(body));
@@ -3613,6 +3636,17 @@ fn paint_settings_panel(
     }
 
     ui.set_clip_rect(old_clip);
+    // #region agent log
+    static PAINT_OK: AtomicU32 = AtomicU32::new(0);
+    if PAINT_OK.fetch_add(1, Ordering::Relaxed) < 4 {
+        agent_dbg(
+            "H4",
+            "main.rs:paint_settings_panel",
+            "settings content painted",
+            &format!("{{\"h\":{},\"w\":{}}}", rect.height(), rect.width()),
+        );
+    }
+    // #endregion
     actions
 }
 
