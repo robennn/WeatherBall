@@ -593,6 +593,7 @@ impl CityPicker {
 }
 
 fn main() -> eframe::Result<()> {
+    install_panic_log();
     display::enable_per_monitor_dpi();
     if !display::take_instance_lock() {
         return Ok(());
@@ -628,8 +629,8 @@ fn main() -> eframe::Result<()> {
         .with_maximize_button(false)
         .with_mouse_passthrough(false)
         .with_visible(true)
-        // Never use an empty title: some NVIDIA DWM paths substitute the
-        // caption-font subfamily "Normal". NBSP is invisible if chrome leaks.
+        // Borderless, so the title is never shown. An NBSP keeps it blank-looking
+        // if any window chrome ever leaks through.
         .with_title(SILENT_WINDOW_TITLE);
     if let Some((x, y)) = saved_pos {
         let [lx, ly] = display::physical_to_logical_pos(x, y);
@@ -768,62 +769,50 @@ fn main() -> eframe::Result<()> {
     )
 }
 
-/// Invisible hwnd title. Empty titles make some DWM paths paint "Normal".
+/// Blank-looking hwnd title. NBSP rather than "" so the string is never empty
+/// for callers that treat an empty title as "no window here".
 const SILENT_WINDOW_TITLE: &str = "\u{00A0}";
 
-// #region agent log
-fn agent_dbg(hyp: &str, loc: &str, msg: &str, data_json: &str) {
-    use std::io::Write;
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let line = format!(
-        "{{\"sessionId\":\"a1d3f1\",\"runId\":\"pre-fix\",\"hypothesisId\":\"{hyp}\",\"location\":\"{loc}\",\"message\":\"{msg}\",\"data\":{data_json},\"timestamp\":{ts}}}\n"
-    );
-    let mut paths = vec![
-        std::path::PathBuf::from(r"f:\vue1\WeatherBall\debug-a1d3f1.log"),
-    ];
-    if let Some(dir) = settings::app_dir() {
-        paths.push(dir.join("debug-a1d3f1.log"));
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            paths.push(dir.join("debug-a1d3f1.log"));
+/// A panic inside the paint closure unwinds into the Win32 window procedure,
+/// which aborts the process with no window and no message. The release build is
+/// stripped, so a backtrace is useless — but `Location` survives stripping, and
+/// `file:line` is enough to find the panic.
+fn install_panic_log() {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        use std::io::Write;
+        let loc = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "unknown".into());
+        let msg = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "no message".into());
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let line = format!("[{secs}] v{} {loc} {msg}\n", env!("CARGO_PKG_VERSION"));
+        if let Some(dir) = settings::app_dir() {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("crash.log"))
+            {
+                let _ = f.write_all(line.as_bytes());
+            }
         }
-    }
-    for path in paths {
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-            let _ = f.write_all(line.as_bytes());
-            let _ = f.flush();
-        }
-    }
+        prev(info);
+    }));
 }
 
-#[cfg(target_os = "windows")]
-fn agent_exstyle(hwnd: isize) -> isize {
-    const GWL_EXSTYLE: i32 = -20;
-    extern "system" {
-        fn GetWindowLongPtrW(h_wnd: *mut std::ffi::c_void, n_index: i32) -> isize;
-    }
-    if hwnd == 0 {
-        return 0;
-    }
-    unsafe { GetWindowLongPtrW(hwnd as *mut std::ffi::c_void, GWL_EXSTYLE) }
-}
-
-#[cfg(target_os = "windows")]
-fn agent_rbutton_down() -> bool {
-    const VK_RBUTTON: i32 = 0x02;
-    extern "system" {
-        fn GetAsyncKeyState(vkey: i32) -> i16;
-    }
-    (unsafe { GetAsyncKeyState(VK_RBUTTON) } as u16) & 0x8000 != 0
-}
-// #endregion
-
-/// Reject faces that cannot actually draw CJK. A broken TTC face often maps
-/// every character to one glyph and rasterizes the style name "Normal".
+/// Reject faces that cannot actually draw CJK. A collection index can resolve to
+/// a face that maps every character onto one placeholder glyph, so a non-zero
+/// glyph id is not enough — the ideographs must also be distinct from each other
+/// and shaped like ideographs.
 fn face_has_distinct_cjk(bytes: &[u8], index: u32) -> bool {
     use ab_glyph::{Font, FontRef, ScaleFont};
     let Ok(font) = FontRef::try_from_slice_and_index(bytes, index) else {
@@ -845,6 +834,8 @@ fn face_has_distinct_cjk(bytes: &[u8], index: u32) -> bool {
             }
         }
     }
+    // An ideograph that resolves to the same glyph as a Latin letter means the
+    // cmap is bogus, not that the face covers CJK.
     for ch in ['N', 'o', 'r', 'm', 'a', 'l'] {
         let latin = font.glyph_id(ch);
         if ids.iter().any(|&id| id == latin) {
@@ -855,8 +846,8 @@ fn face_has_distinct_cjk(bytes: &[u8], index: u32) -> bool {
     for ch in cjk {
         let gid = font.glyph_id(ch);
         let adv = scaled.h_advance(gid);
-        // A face that bakes the word "Normal" into the CJK slot is far wider
-        // than a square ideograph.
+        // Ideographs are near-square at this scale. A wildly different advance
+        // means the slot holds something else.
         if !(8.0..=48.0).contains(&adv) {
             return false;
         }
@@ -1043,7 +1034,7 @@ fn install_user_font(path: &std::path::Path) {
 }
 
 /// System TTF first, then a cached/downloaded Noto SC face. TTC is last because
-/// a bad collection face can rasterize the style name "Normal".
+/// picking the right face out of a collection is the least reliable step.
 fn ensure_cjk_font() -> Option<(Vec<u8>, u32)> {
     if let Some(font) = load_system_cjk_ttf() {
         return Some(font);
@@ -1194,9 +1185,8 @@ impl eframe::App for OrbApp {
         }
 
         // winit keeps WS_CAPTION for aero snap and restores it after DPI/style
-        // refreshes. On some NVIDIA DWM setups that paints the window title in the
-        // client area (often the font subfamily "Normal") at the top of the hwnd.
-        // Run even while hidden so the first ShowWindow cannot flash the caption.
+        // refreshes, which brings back the system menu and the resize border.
+        // Run even while hidden so the first ShowWindow cannot flash chrome.
         #[cfg(target_os = "windows")]
         {
             let hwnd = self.main_hwnd.load(Ordering::Relaxed);
@@ -1740,28 +1730,6 @@ impl eframe::App for OrbApp {
                         }
                     }
                     if ball.secondary_clicked() {
-                        // #region agent log
-                        agent_dbg(
-                            "H4",
-                            "main.rs:secondary_clicked",
-                            "orb right-click opened settings path",
-                            &format!(
-                                "{{\"settings_open\":{},\"detail_open\":{},\"exstyle\":{}}}",
-                                self.settings_open,
-                                self.detail_open,
-                                {
-                                    #[cfg(target_os = "windows")]
-                                    {
-                                        agent_exstyle(self.main_hwnd.load(Ordering::Relaxed))
-                                    }
-                                    #[cfg(not(target_os = "windows"))]
-                                    {
-                                        0
-                                    }
-                                }
-                            ),
-                        );
-                        // #endregion
                         if self.settings_open {
                             self.settings_open = false;
                         } else {
@@ -2077,21 +2045,12 @@ fn spawn_tray_menu_wake(
                 break;
             };
             let TrayIconEvent::Click {
-                button,
                 button_state: MouseButtonState::Down,
                 ..
             } = ev
             else {
                 continue;
             };
-            // #region agent log
-            agent_dbg(
-                "H3",
-                "main.rs:tray_click",
-                "tray icon button down",
-                &format!("{{\"button\":\"{button:?}\"}}"),
-            );
-            // #endregion
             let visible = Arc::clone(&window_visible);
             let hwnd = Arc::clone(&main_hwnd);
             let ctx = ctx.clone();
@@ -3408,21 +3367,9 @@ fn paint_settings_panel(
     paint_panel_card(ui, rect, opacity, theme, skin_tex);
 
     let pad = 14.0;
-    // Opening settings from compact animates a ~10px card. shrink(14) inverts
-    // the inner rect and the old 4000px layout tessellates off-screen — NVIDIA dies.
-    // Left-click first expands the panel, so this path never ran.
+    // Below this the inner rect inverts, so every row would be clipped away
+    // anyway. Bail out instead of laying out content nobody can see.
     if rect.height() < pad * 2.0 + MIN_INNER_H {
-        // #region agent log
-        static SKIP_LOGS: AtomicU32 = AtomicU32::new(0);
-        if SKIP_LOGS.fetch_add(1, Ordering::Relaxed) < 6 {
-            agent_dbg(
-                "H4",
-                "main.rs:paint_settings_panel",
-                "skip settings content while panel too short",
-                &format!("{{\"h\":{},\"w\":{}}}", rect.height(), rect.width()),
-            );
-        }
-        // #endregion
         ui.set_clip_rect(old_clip);
         return actions;
     }
@@ -3592,7 +3539,12 @@ fn paint_settings_panel(
             Pos2::new(inner.max.x - 4.0, body.min.y + 2.0),
             Pos2::new(inner.max.x, body.max.y - 2.0),
         );
-        let thumb_h = ((view_h / CONTENT_H) * bar.height()).clamp(14.0, bar.height());
+        // A 14px minimum thumb is only a minimum while the bar is taller than
+        // that. `clamp(14.0, bar.height())` panics once the opening animation
+        // makes the bar shorter, which killed the process outright.
+        let thumb_h = ((view_h / CONTENT_H) * bar.height())
+            .max(14.0)
+            .min(bar.height());
         let travel = (bar.height() - thumb_h).max(0.0);
         let thumb_t = if max_scroll > 0.0 {
             *scroll / max_scroll
@@ -3636,17 +3588,6 @@ fn paint_settings_panel(
     }
 
     ui.set_clip_rect(old_clip);
-    // #region agent log
-    static PAINT_OK: AtomicU32 = AtomicU32::new(0);
-    if PAINT_OK.fetch_add(1, Ordering::Relaxed) < 4 {
-        agent_dbg(
-            "H4",
-            "main.rs:paint_settings_panel",
-            "settings content painted",
-            &format!("{{\"h\":{},\"w\":{}}}", rect.height(), rect.width()),
-        );
-    }
-    // #endregion
     actions
 }
 
@@ -5649,14 +5590,6 @@ fn harden_tray_hwnd() {
         unsafe { SetWindowLongPtrW(h, GWL_EXSTYLE, next) };
     }
     win_post_null(hwnd);
-    // #region agent log
-    agent_dbg(
-        "H3",
-        "main.rs:harden_tray_hwnd",
-        "tray hwnd styles after harden",
-        &format!("{{\"hwnd\":{hwnd},\"ex_before\":{ex},\"ex_after\":{}}}", agent_exstyle(hwnd)),
-    );
-    // #endregion
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -5815,22 +5748,6 @@ fn ensure_orb_click_guard(hwnd_val: isize) {
         return;
     }
     ORB_WNDPROC_ORIG.store(orig, Ordering::Relaxed);
-    // #region agent log
-    static GUARD_LOGS: AtomicU32 = AtomicU32::new(0);
-    let n = GUARD_LOGS.fetch_add(1, Ordering::Relaxed);
-    if n < 4 {
-        agent_dbg(
-            "H2",
-            "main.rs:ensure_orb_click_guard",
-            "installed or reinstalled orb wndproc",
-            &format!(
-                "{{\"hwnd\":{hwnd_val},\"exstyle\":{},\"n\":{}}}",
-                agent_exstyle(hwnd_val),
-                n
-            ),
-        );
-    }
-    // #endregion
 }
 
 #[cfg(target_os = "windows")]
@@ -5882,72 +5799,28 @@ unsafe extern "system" fn orb_wndproc(
             let x = packed as i16 as i32;
             let y = (packed >> 16) as i16 as i32;
             let hit = orb_hit_screen(x, y);
-            // #region agent log
-            if agent_rbutton_down() {
-                static NCHIT_LOGS: AtomicU32 = AtomicU32::new(0);
-                if NCHIT_LOGS.fetch_add(1, Ordering::Relaxed) < 8 {
-                    let hwnd_val = hwnd as isize;
-                    agent_dbg(
-                        "H1",
-                        "main.rs:orb_wndproc:nchittest",
-                        "nchittest while right button down",
-                        &format!(
-                            "{{\"x\":{x},\"y\":{y},\"hit\":{hit},\"exstyle\":{}}}",
-                            agent_exstyle(hwnd_val)
-                        ),
-                    );
-                }
-            }
-            // #endregion
             if hit {
                 HTCLIENT
             } else {
                 HTTRANSPARENT
             }
         }
-        WM_NCRBUTTONDOWN | WM_NCRBUTTONUP | WM_NCRBUTTONDBLCLK | WM_CONTEXTMENU => {
-            // #region agent log
-            agent_dbg(
-                "H5",
-                "main.rs:orb_wndproc:nc_right",
-                "nonclient or context-menu message",
-                &format!(
-                    "{{\"msg\":{msg},\"exstyle\":{}}}",
-                    agent_exstyle(hwnd as isize)
-                ),
-            );
-            // #endregion
-            0
-        }
+        WM_NCRBUTTONDOWN | WM_NCRBUTTONUP | WM_NCRBUTTONDBLCLK | WM_CONTEXTMENU => 0,
         WM_SYSCOMMAND if (wparam & 0xFFF0) == SC_KEYMENU || (wparam & 0xFFF0) == SC_MOUSEMENU => 0,
         _ => {
-            // #region agent log
-            const WM_LBUTTONDOWN: u32 = 0x0201;
-            const WM_RBUTTONDOWN: u32 = 0x0204;
-            const WM_RBUTTONUP: u32 = 0x0205;
-            if msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP {
-                agent_dbg(
-                    "H2",
-                    "main.rs:orb_wndproc:button",
-                    "client mouse button",
-                    &format!(
-                        "{{\"msg\":{msg},\"exstyle\":{}}}",
-                        agent_exstyle(hwnd as isize)
-                    ),
-                );
-            }
-            // #endregion
             call_prev(msg, wparam, lparam)
         }
     }
 }
 
-/// Keep the hwnd borderless. winit's frameless path leaves WS_CAPTION set and
-/// uses WM_NCCALCSIZE to hide the non-client area; some NVIDIA DWM paths still
-/// paint the caption string in the client (often the font style name "Normal").
+/// Keep the hwnd borderless and out of the taskbar. winit's frameless path only
+/// hides the non-client area via WM_NCCALCSIZE and leaves WS_CAPTION set, so the
+/// system menu, resize border and rounded corners can still come back. Strip the
+/// styles outright and tell DWM not to draw a frame.
 ///
-/// Empty titles are worse than "WeatherBall": DWM may substitute the caption
-/// font's subfamily ("Normal" / "常规"). Use an NBSP instead.
+/// Note: a stray "NORMAL" in the window's top-right corner is not this — that is
+/// NVIDIA's G-SYNC indicator (控制面板 → 显示 → G-SYNC 指示器), which reads
+/// "Normal" when G-Sync is not engaged for the window.
 #[cfg(target_os = "windows")]
 fn hide_hwnd_from_taskbar(hwnd_val: isize) -> bool {
     use std::ffi::c_void;
