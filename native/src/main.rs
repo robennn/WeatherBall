@@ -1387,6 +1387,12 @@ impl eframe::App for OrbApp {
                     let visible_h = (full_h * height_ease).max(0.0);
                     let bottom = top + visible_h;
                     if bottom > top + 4.0 {
+                        // Full card geometry for layout + skin UV; `pr` only clips the reveal.
+                        // Cover-UV from the animated height made the header skin jump every open/close.
+                        let full_pr = Rect::from_min_max(
+                            Pos2::new(8.0, top),
+                            Pos2::new(W - 8.0, full_bottom),
+                        );
                         let pr = Rect::from_min_max(
                             Pos2::new(8.0, top),
                             Pos2::new(W - 8.0, bottom),
@@ -1399,6 +1405,7 @@ impl eframe::App for OrbApp {
                             PanelKind::Settings => {
                                 let actions = paint_settings_panel(
                                     ui,
+                                    full_pr,
                                     pr,
                                     panel_opacity,
                                     interactive,
@@ -1425,6 +1432,7 @@ impl eframe::App for OrbApp {
                             PanelKind::Skins => {
                                 let actions = paint_skins_panel(
                                     ui,
+                                    full_pr,
                                     pr,
                                     panel_opacity,
                                     interactive,
@@ -1438,6 +1446,7 @@ impl eframe::App for OrbApp {
                             PanelKind::Detail => {
                                 let actions = paint_detail_panel(
                                     ui,
+                                    full_pr,
                                     pr,
                                     snapshot.as_ref(),
                                     loading,
@@ -1741,33 +1750,16 @@ impl eframe::App for OrbApp {
                     }
                 }
 
-                // Click-through is WM_NCHITTEST → HTTRANSPARENT (see orb_wndproc).
-                // Do not use ViewportCommand::MousePassthrough: that sets
-                // WS_EX_TRANSPARENT|WS_EX_LAYERED, and NVIDIA still delivers
-                // right-clicks to that combo (left-clicks pass through) which
-                // crashes the GL driver. A prior left-click only "fixed" it
-                // because hover had already cleared TRANSPARENT.
-                publish_orb_hit_regions(
-                    self.main_hwnd.load(Ordering::Relaxed),
-                    center,
-                    ball_r() + 2.0,
-                    if btn_rect.width() > 1.0 {
-                        Some(btn_rect)
-                    } else {
-                        None
-                    },
-                    panel_rect.filter(|_| panel_opacity > 0.5),
-                    self.dragging,
-                );
-                if self.last_passthrough != Some(false) {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(false));
-                    self.last_passthrough = Some(false);
-                }
-
-                // Tooltip only when mostly compact
-                if over_ball && compact_ui && !over_btn {
+                // Tooltip only when fully compact. Do NOT key off `compact_ui`
+                // (detail_t < 0.18): on close that threshold re-shows the tooltip
+                // while the panel header is still fading, which reads as a flash.
+                let tooltip_rect = if over_ball
+                    && !panel_open
+                    && self.detail_t < 0.02
+                    && !over_btn
+                {
                     let force_err = env_force_weather_error();
-                    paint_tooltip(
+                    Some(paint_tooltip(
                         ui,
                         Pos2::new(center.x, center.y - ball_r() + 6.0),
                         rect,
@@ -1787,7 +1779,32 @@ impl eframe::App for OrbApp {
                         },
                         loading && !force_err,
                         rain_hint.map(|s| s.hint()),
-                    );
+                    ))
+                } else {
+                    None
+                };
+
+                // Click-through: SetWindowRgn shapes the hwnd to ball (+ panel /
+                // buttons / tip). HTTRANSPARENT alone does not pass clicks to
+                // other processes — WindowFromPoint still owns the full 160×520.
+                // Tooltip is included in the region only while painted so it is
+                // not clipped; empty areas above/below stay outside the region.
+                publish_orb_hit_regions(
+                    self.main_hwnd.load(Ordering::Relaxed),
+                    center,
+                    ball_r() * 1.32, // covers soft glow (paint uses up to ~1.28×)
+                    if btn_rect.width() > 1.0 {
+                        Some(btn_rect)
+                    } else {
+                        None
+                    },
+                    panel_rect.filter(|_| panel_opacity > 0.5),
+                    tooltip_rect,
+                    self.dragging,
+                );
+                if self.last_passthrough != Some(false) {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(false));
+                    self.last_passthrough = Some(false);
                 }
             });
 
@@ -2848,7 +2865,8 @@ fn cover_uv(rect: Rect, tex_w: f32, tex_h: f32) -> Rect {
 
 fn paint_detail_panel(
     ui: &mut egui::Ui,
-    rect: Rect,
+    layout: Rect,
+    visible: Rect,
     data: Option<&LiveWeather>,
     loading: bool,
     opacity: f32,
@@ -2875,20 +2893,21 @@ fn paint_detail_panel(
         return actions;
     }
 
-    let clip = ui.clip_rect().intersect(rect);
+    // Clip to the animated reveal; paint/layout against full card so skin UV stays put.
+    let clip = ui.clip_rect().intersect(visible);
     let old_clip = ui.clip_rect();
     ui.set_clip_rect(clip);
 
-    paint_panel_card(ui, rect, opacity, theme, skin_tex);
+    paint_panel_card(ui, layout, opacity, theme, skin_tex);
 
     if picker.open {
-        paint_city_picker(ui, rect, loading, opacity, interactive, picker, &mut actions, theme);
+        paint_city_picker(ui, layout, loading, opacity, interactive, picker, &mut actions, theme);
         ui.set_clip_rect(old_clip);
         return actions;
     }
 
     let pad = 12.0;
-    let inner = rect.shrink(pad);
+    let inner = layout.shrink(pad);
     let mut y = inner.min.y;
 
     // City row + close
@@ -3327,7 +3346,8 @@ fn paint_panel_card(
 
 fn paint_settings_panel(
     ui: &mut egui::Ui,
-    rect: Rect,
+    layout: Rect,
+    visible: Rect,
     opacity: f32,
     interactive: bool,
     autostart_t: f32,
@@ -3361,20 +3381,20 @@ fn paint_settings_panel(
     const CONTENT_H: f32 = SETTING_BLOCK * 4.0 + SLIDER_BLOCK * 2.0 + 8.0;
     const MIN_INNER_H: f32 = HEADER_H + 32.0;
 
-    let clip = ui.clip_rect().intersect(rect);
+    let clip = ui.clip_rect().intersect(visible);
     let old_clip = ui.clip_rect();
     ui.set_clip_rect(clip);
-    paint_panel_card(ui, rect, opacity, theme, skin_tex);
+    paint_panel_card(ui, layout, opacity, theme, skin_tex);
 
     let pad = 14.0;
     // Below this the inner rect inverts, so every row would be clipped away
     // anyway. Bail out instead of laying out content nobody can see.
-    if rect.height() < pad * 2.0 + MIN_INNER_H {
+    if visible.height() < pad * 2.0 + MIN_INNER_H {
         ui.set_clip_rect(old_clip);
         return actions;
     }
 
-    let inner = rect.shrink(pad);
+    let inner = layout.shrink(pad);
     let mut y = inner.min.y;
 
     let close_r = Rect::from_min_size(
@@ -3409,7 +3429,7 @@ fn paint_settings_panel(
     );
     let view_h = body.height().max(0.0);
     let max_scroll = (CONTENT_H - view_h).max(0.0);
-    if interactive && ui.rect_contains_pointer(rect) {
+    if interactive && ui.rect_contains_pointer(visible) {
         let dy = ui.ctx().input_mut(|i| {
             let d = i.smooth_scroll_delta.y;
             if d.abs() > 0.01 {
@@ -3598,7 +3618,8 @@ struct SkinsActions {
 
 fn paint_skins_panel(
     ui: &mut egui::Ui,
-    rect: Rect,
+    layout: Rect,
+    visible: Rect,
     opacity: f32,
     interactive: bool,
     current: &str,
@@ -3613,13 +3634,13 @@ fn paint_skins_panel(
         return actions;
     }
 
-    let clip = ui.clip_rect().intersect(rect);
+    let clip = ui.clip_rect().intersect(visible);
     let old_clip = ui.clip_rect();
     ui.set_clip_rect(clip);
-    paint_panel_card(ui, rect, opacity, theme, skin_tex);
+    paint_panel_card(ui, layout, opacity, theme, skin_tex);
 
     let pad = 14.0;
-    let inner = rect.shrink(pad);
+    let inner = layout.shrink(pad);
     let mut y = inner.min.y;
 
     let close_r = Rect::from_min_size(
@@ -4505,7 +4526,7 @@ fn paint_tooltip(
     error: Option<&str>,
     loading: bool,
     rain_soon_hint: Option<String>,
-) {
+) -> Rect {
     #[derive(Clone, Copy)]
     enum LineKind {
         Temp,
@@ -4629,8 +4650,7 @@ fn paint_tooltip(
         tip.max.x = bounds.max.x - margin;
     }
 
-    let old_clip = ui.clip_rect();
-    ui.set_clip_rect(old_clip.expand(24.0).union(tip.expand(2.0)));
+    // Don't modify clip_rect - paint directly to avoid affecting window interaction area
     let p = ui.painter();
     p.rect_filled(tip, 8.0, Color32::from_rgba_unmultiplied(12, 18, 32, 242));
     p.rect_stroke(
@@ -4667,7 +4687,7 @@ fn paint_tooltip(
         }
         y += h + gap;
     }
-    ui.set_clip_rect(old_clip);
+    tip
 }
 
 fn make_drops(scene: Scene) -> Vec<Drop> {
@@ -5640,7 +5660,11 @@ static HIT_BALL_Y: AtomicI32 = AtomicI32::new(0);
 #[cfg(target_os = "windows")]
 static HIT_BALL_R: AtomicI32 = AtomicI32::new(0);
 #[cfg(target_os = "windows")]
-static HIT_RECT: [AtomicI32; 8] = [
+static HIT_RECT: [AtomicI32; 12] = [
+    AtomicI32::new(0),
+    AtomicI32::new(0),
+    AtomicI32::new(0),
+    AtomicI32::new(0),
     AtomicI32::new(0),
     AtomicI32::new(0),
     AtomicI32::new(0),
@@ -5661,6 +5685,7 @@ fn publish_orb_hit_regions(
     ball_r: f32,
     btn: Option<Rect>,
     panel: Option<Rect>,
+    tooltip: Option<Rect>,
     dragging: bool,
 ) {
     #[cfg(target_os = "windows")]
@@ -5674,11 +5699,127 @@ fn publish_orb_hit_regions(
         HIT_DRAG.store(dragging, Ordering::Relaxed);
         store_hit_rect(0, btn, ox, oy, scale);
         store_hit_rect(4, panel, ox, oy, scale);
+        // Tip is not an NCHITTEST target (pointer-events: none), but it is part of
+        // the shaped window region so the card is not clipped while visible.
+        store_hit_rect(8, None, ox, oy, scale);
+        apply_orb_window_region(hwnd, ball_center, ball_r, btn, panel, tooltip, dragging, scale);
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (hwnd, ball_center, ball_r, btn, panel, dragging);
+        let _ = (hwnd, ball_center, ball_r, btn, panel, tooltip, dragging);
     }
+}
+
+/// Limit the hwnd to the orb (+ open panel / debug buttons / tip). Outside this
+/// region Windows delivers clicks to whatever is underneath — unlike
+/// HTTRANSPARENT, which only continues hit-testing within the same thread.
+///
+/// Never expand to the full client while dragging: after the panel has been
+/// shown, stale panel pixels can linger in the swapchain outside the shaped
+/// region; enlarging the region for one drag would flash that ghost detail.
+/// Win32 drag follows the cursor via GetCursorPos, so the shape can stay tight.
+#[cfg(target_os = "windows")]
+fn apply_orb_window_region(
+    hwnd: isize,
+    ball_center: Pos2,
+    ball_r: f32,
+    btn: Option<Rect>,
+    panel: Option<Rect>,
+    tooltip: Option<Rect>,
+    _dragging: bool,
+    scale: f32,
+) {
+    use std::sync::atomic::AtomicU64;
+
+    if hwnd == 0 {
+        return;
+    }
+
+    // Fingerprint so we don't SetWindowRgn every frame (causes DWM flicker).
+    static LAST_KEY: AtomicU64 = AtomicU64::new(u64::MAX);
+
+    extern "system" {
+        fn CreateEllipticRgn(x1: i32, y1: i32, x2: i32, y2: i32) -> *mut std::ffi::c_void;
+        fn CreateRectRgn(x1: i32, y1: i32, x2: i32, y2: i32) -> *mut std::ffi::c_void;
+        fn CombineRgn(
+            dest: *mut std::ffi::c_void,
+            a: *mut std::ffi::c_void,
+            b: *mut std::ffi::c_void,
+            mode: i32,
+        ) -> i32;
+        fn DeleteObject(h: *mut std::ffi::c_void) -> i32;
+        fn SetWindowRgn(hwnd: *mut std::ffi::c_void, hrgn: *mut std::ffi::c_void, redraw: i32)
+            -> i32;
+    }
+    const RGN_OR: i32 = 2;
+
+    let q = |v: f32| v.round() as i32;
+    let mut key = 0u64;
+    key ^= (q(ball_center.x * scale) as u64).wrapping_mul(0x9E37_79B9);
+    key ^= (q(ball_center.y * scale) as u64).wrapping_mul(0x85EB_CA6B);
+    key ^= (q(ball_r * scale) as u64).wrapping_mul(0xC2B2_AE35);
+    for (i, rect) in [btn, panel, tooltip].into_iter().enumerate() {
+        if let Some(r) = rect.filter(|r| r.width() > 1.0 && r.height() > 1.0) {
+            key ^= (q(r.min.x * scale) as u64).wrapping_mul(0x27D4_EB2Du64 << i);
+            key ^= (q(r.min.y * scale) as u64).wrapping_mul(0x1656_67B1u64 << i);
+            key ^= (q(r.max.x * scale) as u64).wrapping_mul(0x85EB_CA6Bu64 >> i);
+            key ^= (q(r.max.y * scale) as u64).wrapping_mul(0xC2B2_AE35u64 >> i);
+        }
+    }
+    if LAST_KEY.swap(key, Ordering::Relaxed) == key {
+        return;
+    }
+
+    let h = hwnd as *mut std::ffi::c_void;
+    unsafe {
+        let cx = (ball_center.x * scale).round() as i32;
+        let cy = (ball_center.y * scale).round() as i32;
+        let cr = (ball_r * scale).ceil().max(1.0) as i32;
+        let ball = CreateEllipticRgn(cx - cr, cy - cr, cx + cr + 1, cy + cr + 1);
+        let dest = CreateRectRgn(0, 0, 0, 0);
+        CombineRgn(dest, ball, ball, RGN_OR);
+        DeleteObject(ball);
+
+        let add_rect = |dest: *mut std::ffi::c_void, r: Rect| {
+            let l = (r.min.x * scale).floor() as i32;
+            let t = (r.min.y * scale).floor() as i32;
+            let right = (r.max.x * scale).ceil() as i32;
+            let b = (r.max.y * scale).ceil() as i32;
+            if right > l && b > t {
+                let rr = CreateRectRgn(l, t, right, b);
+                CombineRgn(dest, dest, rr, RGN_OR);
+                DeleteObject(rr);
+            }
+        };
+        if let Some(r) = btn.filter(|r| r.width() > 1.0 && r.height() > 1.0) {
+            add_rect(dest, r);
+        }
+        if let Some(r) = panel.filter(|r| r.width() > 1.0 && r.height() > 1.0) {
+            add_rect(dest, r);
+        }
+        if let Some(r) = tooltip.filter(|r| r.width() > 1.0 && r.height() > 1.0) {
+            add_rect(dest, r);
+        }
+
+        if dest.is_null() {
+            return;
+        }
+        // SetWindowRgn takes ownership of the region handle.
+        SetWindowRgn(h, dest, 1);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn apply_orb_window_region(
+    _hwnd: isize,
+    _ball_center: Pos2,
+    _ball_r: f32,
+    _btn: Option<Rect>,
+    _panel: Option<Rect>,
+    _tooltip: Option<Rect>,
+    _dragging: bool,
+    _scale: f32,
+) {
 }
 
 #[cfg(target_os = "windows")]
@@ -5715,7 +5856,7 @@ fn orb_hit_screen(x: i32, y: i32) -> bool {
             return true;
         }
     }
-    for slot in [0usize, 4] {
+    for slot in [0usize, 4, 8] {
         let l = HIT_RECT[slot].load(Ordering::Relaxed);
         let t = HIT_RECT[slot + 1].load(Ordering::Relaxed);
         let right = HIT_RECT[slot + 2].load(Ordering::Relaxed);
@@ -5758,6 +5899,8 @@ unsafe extern "system" fn orb_wndproc(
     lparam: isize,
 ) -> isize {
     const WM_NCHITTEST: u32 = 0x0084;
+    const WM_NCACTIVATE: u32 = 0x0086;
+    const WM_NCPAINT: u32 = 0x0085;
     const WM_NCRBUTTONDOWN: u32 = 0x00A4;
     const WM_NCRBUTTONUP: u32 = 0x00A5;
     const WM_NCRBUTTONDBLCLK: u32 = 0x00A6;
@@ -5805,6 +5948,10 @@ unsafe extern "system" fn orb_wndproc(
                 HTTRANSPARENT
             }
         }
+        // Borderless: skip NC activate/paint so focus changes cannot flash a
+        // caption strip over the panel header.
+        WM_NCACTIVATE => 1, // TRUE — keep "active" look, no NC redraw
+        WM_NCPAINT => 0,
         WM_NCRBUTTONDOWN | WM_NCRBUTTONUP | WM_NCRBUTTONDBLCLK | WM_CONTEXTMENU => 0,
         WM_SYSCOMMAND if (wparam & 0xFFF0) == SC_KEYMENU || (wparam & 0xFFF0) == SC_MOUSEMENU => 0,
         _ => {
@@ -5955,13 +6102,15 @@ fn hide_hwnd_from_taskbar(hwnd_val: isize) -> bool {
         let no_nc: u32 = 0;
         let backdrop = DWMSBT_NONE;
         let corner = DWMWCP_DONOTROUND;
-        DwmSetWindowAttribute(hwnd, DWMWA_ALLOW_NCPAINT, &no_nc, 4);
-        DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &none, 4);
-        DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &none, 4);
-        DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop, 4);
-        DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, 4);
-
+        // Only poke DWM when styles actually changed — calling these every
+        // frame can invalidate the non-client area and flash the header.
         if changed {
+            DwmSetWindowAttribute(hwnd, DWMWA_ALLOW_NCPAINT, &no_nc, 4);
+            DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &none, 4);
+            DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &none, 4);
+            DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop, 4);
+            DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, 4);
+
             let empty: [u16; 1] = [0];
             SetWindowTheme(hwnd, empty.as_ptr(), empty.as_ptr());
             // Same empty-region blur winit uses for per-pixel alpha — not the

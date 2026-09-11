@@ -49,7 +49,8 @@ defineProps<{
   pointer-events: none;
   transition:
     opacity 0.18s ease,
-    transform 0.18s ease;
+    transform 0.18s ease,
+    visibility 0s linear 0.18s;
   -webkit-app-region: no-drag;
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
@@ -58,11 +59,14 @@ defineProps<{
     0 0 0 1px rgba(0, 0, 0, 0.3),
     0 10px 28px rgba(0, 0, 0, 0.45);
   z-index: 5;
+  visibility: hidden;
 }
 
 .tooltip.show {
   opacity: 1;
   transform: translate(-50%, 0);
+  visibility: visible;
+  transition-delay: 0s;
 }
 
 .temp {
